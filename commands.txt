@@ -1,4 +1,0 @@
-source prove-env/bin/activate
-cd ~/ProVe-main
-
-https://chat.deepseek.com/share/ddbiy9xd1yf9pdvmut
