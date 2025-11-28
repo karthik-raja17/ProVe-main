@@ -34,6 +34,9 @@ class ProVeBatchClient:
         return response.json()
 
 DIVERSE_WIKIDATA_INSTANCES = {
+    # History
+    "Q2277": "Roman Empire",
+    
     # Politics & Leaders
     "Q76": "Barack Obama",
     "Q9682": "Volodymyr Zelenskyy", 
@@ -47,7 +50,7 @@ DIVERSE_WIKIDATA_INSTANCES = {
     "Q913": "Theory of Evolution",
     
     # Cultural Heritage & Arts
-    "Q22686": "The Lord of the Rings (film)",
+    "Q22686": "Donald Trump",
     "Q729": "Wolfgang Amadeus Mozart",
     "Q881": "Victor Hugo",
     
@@ -62,18 +65,18 @@ DIVERSE_WIKIDATA_INSTANCES = {
     "Q60": "New York City",
     "Q148": "Beijing",
     "Q64": "Berlin",
-    "Q1748": "Tokyo",
+    "Q1748": "Copenhagen",
     
     # Organizations & Institutions
     "Q413": "Microsoft",
     "Q95": "Google",
-    "Q94": "Facebook",
+    "Q94": "Android",
     
     # Concepts & Ideas
     "Q5891": "Democracy",
 
     
-    # More Countries (similar to Q30, Q145, Q183)
+    # Countries 
     "Q16": "Canada",
     "Q39": "Switzerland",
     "Q40": "Austria"  

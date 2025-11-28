@@ -1,0 +1,9 @@
+Domain,QID,Item Name,Claim (Triple),Snippet Evidence,ProVe Verdict,Human Verdict,Agreement
+Politics,Q76,Barack Obama,Barack Obama family name Ciobama,cant find the source need to check,SUPPORTS,REFUTES,NO
+Politics,Q76,Barack Obama,Barack Obama country of citizenship Kenya,"As a citizen of the UKC who was born in Kenya, Obama's father automatically\nreceived Kenyan citizenship via subsection (1).""",SUPPORTS,REFUTES,NO
+,,,,"Since Sen. Obama has neither renounced his U.S. citizenship nor\n> sworn an oath of allegiance to Kenya, his Kenyan citizenship automatically\n> expired on Aug. 4,1982.",,,
+Politics,Q76,Barack Obama,Barack Obama eye color brown,\nColor of Eyes:| Brown \nColor,SUPPORTS,SUPPORTS,YES
+History,Q2277,Roman Empire,Roman Empire different from Latin Empire,...usually described by modern historians as the Byzantine Empire...,NOT ENOUGH INFO,NOT ENOUGH INFO,YES
+Science,Q913,Evolution (Theory),"Socrates, sex or gender, male",refers to some files.,SUPPORTS,SUPPORTS,YES
+Culture,Q22686,Lord of the Rings,Donald Trump place of detention Fulton County Jail,"Former President Donald Trump was booked at the Fulton County jail in\nAtlanta on Aug. 24, 2023.",SUPPORTS,SUPPORTS,YES
+Country,Q30,USA,United States shares border with Panama,"C'est au moment de l'indépendance, en 1821, que le Panamá s'est incorporé à la\nNouvelle-Grenade, future Colombie.",NOT ENOUGH INFO,NOT ENOUGH INFO,YES
