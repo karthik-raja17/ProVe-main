@@ -1,0 +1,36 @@
+QID,Description,Domain,Status,Total Verified Claims,Supports,Refutes,Not Enough Info,Reference Score,Error Message
+Q2277,Roman Empire,History,SUCCESS,4,0,0,4,0,
+Q76,Barack Obama,Politics & Leaders,SUCCESS,37,19,6,12,0.2203,
+Q9682,Volodymyr Zelenskyy,Politics & Leaders,SUCCESS,45,18,7,20,0.2037,
+Q312,Angela Merkel,Politics & Leaders,SUCCESS,0,0,0,0,0,Processing failed
+Q23,George Washington,Politics & Leaders,SUCCESS,30,11,2,17,0.2647,
+Q142,Margaret Thatcher,Politics & Leaders,SUCCESS,370,0,165,205,-0.4459,
+Q191,Vladimir Lenin,Politics & Leaders,SUCCESS,32,14,0,18,0.2692,
+Q352,Charles de Gaulle,Politics & Leaders,SUCCESS,52,13,6,33,0.1228,
+Q913,Theory of Evolution,Science & Discoveries,SUCCESS,19,5,1,13,0.2105,
+Q22686,The Lord of the Rings (film),Cultural Heritage & Arts,SUCCESS,65,25,6,34,0.2235,
+Q729,Wolfgang Amadeus Mozart,Cultural Heritage & Arts,SUCCESS,8,2,2,4,0,
+Q881,Victor Hugo,Cultural Heritage & Arts,SUCCESS,0,0,0,0,0,Processing failed
+Q90,Paris,Geography & Places,SUCCESS,0,0,0,0,0,Processing failed
+Q220,Rome,Geography & Places,SUCCESS,0,0,0,0,0,Processing failed
+Q30,United States of America,Geography & Places,SUCCESS,58,19,1,38,0.2278,
+Q145,United Kingdom,Geography & Places,SUCCESS,37,13,0,24,0.2549,
+Q183,Germany,Geography & Places,SUCCESS,245,34,0,211,0.0722,
+Q17,Japan,Geography & Places,SUCCESS,0,0,0,0,0,Processing failed
+Q84,London,Geography & Places,SUCCESS,15,1,0,14,0.0588,
+Q60,New York City,Geography & Places,SUCCESS,24,2,8,14,-0.1935,
+Q148,Beijing,Geography & Places,SUCCESS,0,0,0,0,0,Processing failed
+Q64,Berlin,Geography & Places,SUCCESS,0,0,0,0,0,Processing failed
+Q1748,Tokyo,Geography & Places,FAILED,0,0,0,0,0,HTTP error 500
+Q413,Microsoft,Organizations & Institutions,SUCCESS,0,0,0,0,0,Processing failed
+Q95,Google,Organizations & Institutions,SUCCESS,24,7,1,16,0.1765,
+Q94,Facebook,Organizations & Institutions,FAILED,0,0,0,0,0,HTTP error 500
+Q5891,Democracy,Concepts & Ideas,SUCCESS,19,8,9,2,-0.0526,
+Q16,Canada,Countries,SUCCESS,37,14,0,23,0.2692,
+Q39,Switzerland,Countries,SUCCESS,0,0,0,0,0,Processing failed
+Q40,Austria,Countries,SUCCESS,138,4,25,109,-0.1522,
+,,,,,,,,,
+,,,,,,,,,
+,,,,,,,,,
+,,,,,,,,,
+,,,41.9666666666667,,,,,,
