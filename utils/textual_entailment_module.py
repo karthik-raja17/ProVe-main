@@ -2,18 +2,21 @@
 Textual Entailment Module for ProVe
 Basic implementation
 """
-from transformers import pipeline
+import torch
+from transformers import BertTokenizer, BertForSequenceClassification, pipeline
+import numpy as np
+import re
 
-class TextualEntailmentModule:
-    def __init__(self):
-        try:
-            self.entailment_pipeline = pipeline(
-                "text-classification", 
-                model="roberta-large-mnli",
-                device=-1  # Use CPU
-            )
-        except:
-            self.entailment_pipeline = None
+class TextualEntailmentModule():
+    def __init__(
+        self,
+        # Ensure these paths point to your local model folder
+        model_path = '/home/kandavel/ProVe-main/textual_entailment_BERT_FEVER_v4_PBT_OG/BERT_FEVER_v4_model_PBT/',
+        tokenizer_path = '/home/kandavel/ProVe-main/textual_entailment_BERT_FEVER_v4_PBT_OG/BERT_FEVER_v4_model_PBT/'
+    ):
+        self.tokenizer = BertTokenizer.from_pretrained(tokenizer_path)
+        self.model = BertForSequenceClassification.from_pretrained(model_path)
+        self.model.to(DEVICE) # Uses 'cuda:0' if available
     
     def check_entailment(self, premise, hypothesis):
         """Check if premise entails hypothesis"""

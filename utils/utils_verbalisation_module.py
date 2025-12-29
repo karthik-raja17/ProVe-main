@@ -18,7 +18,7 @@ from torch import nn
 from torch.utils.data import Dataset, Sampler
 
 from transformers import BartTokenizer, EvalPrediction, PreTrainedTokenizer, T5Tokenizer
-from transformers.file_utils import cached_property
+from functools import cached_property
 from transformers.models.bart.modeling_bart import shift_tokens_right
 from utils.utils_graph2text import convert_text, eval_bleu
 from pytorch_lightning.utilities import rank_zero_info

@@ -87,10 +87,52 @@ def process_entity(qid: str, models: tuple) -> tuple:
     
     return html_df, entailment_results, parser_stats
 
+# ... (all your existing imports and function definitions for initialize_models and process_entity)
+
 if __name__ == "__main__":
-    # Initialize models once
-    models = initialize_models()
+    # Your 30 Diverse Instances
+    DIVERSE_WIKIDATA_INSTANCES = {
+        "Q2277": "Roman Empire", "Q76": "Barack Obama", "Q9682": "Volodymyr Zelenskyy",
+        "Q312": "Angela Merkel", "Q23": "George Washington", "Q142": "Margaret Thatcher",
+        "Q191": "Vladimir Lenin", "Q352": "Charles de Gaulle", "Q913": "Theory of Evolution",
+        "Q22686": "Donald Trump", "Q729": "Wolfgang Amadeus Mozart", "Q881": "Victor Hugo",
+        "Q90": "Paris", "Q220": "Rome", "Q30": "United States of America",
+        "Q145": "United Kingdom", "Q183": "Germany", "Q17": "Japan",
+        "Q84": "London", "Q60": "New York City", "Q148": "Beijing",
+        "Q64": "Berlin", "Q1748": "Copenhagen", "Q413": "Microsoft",
+        "Q95": "Google", "Q94": "Android", "Q5891": "Democracy",
+        "Q16": "Canada", "Q39": "Switzerland", "Q40": "Austria"
+    }
+
+    # 1. Initialize models ONCE locally
+    # No need to import from ProVe_main_process; just call the function defined above.
+    models = initialize_models() 
     
-    # Process entity
-    qid = 'Q44'
-    html_df, entailment_results, parser_stats = process_entity(qid, models)
+    all_results = []
+
+    print(f"Starting batch processing for {len(DIVERSE_WIKIDATA_INSTANCES)} entities...")
+
+    # 2. Iterate through the dictionary
+    for qid, label in DIVERSE_WIKIDATA_INSTANCES.items():
+        print(f"Processing {label} ({qid})...")
+        try:
+            # 3. Call the function directly from this script
+            html_df, entailment_results, parser_stats = process_entity(qid, models)
+            
+            if not entailment_results.empty:
+                # Add metadata to track which entity the results belong to
+                entailment_results['batch_entity_qid'] = qid
+                entailment_results['batch_entity_label'] = label
+                all_results.append(entailment_results)
+                print(f"Successfully processed {len(entailment_results)} claims for {label}.")
+            else:
+                print(f"No claims with valid references found for {label}.")
+                
+        except Exception as e:
+            print(f"Error processing {label}: {e}")
+
+    # 4. Save combined results to a single local CSV
+    if all_results:
+        final_df = pd.concat(all_results, ignore_index=True)
+        final_df.to_csv("batch_results.csv", index=False)
+        print(f"Batch complete. Results saved to batch_results.csv")

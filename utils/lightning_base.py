@@ -7,9 +7,9 @@ import sys
 import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_info
 from pytorch_lightning.callbacks import LearningRateMonitor
+from torch.optim import AdamW
 
 from transformers import (
-    AdamW,
     AutoConfig,
     AutoModel,
     AutoModelForPreTraining,

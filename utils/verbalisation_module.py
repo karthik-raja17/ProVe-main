@@ -9,7 +9,7 @@ else:
     DEVICE = 'cpu'
     print('CUDA NOT AVAILABLE')
 
-CHECKPOINT = '/home/ubuntu/RQV/base/t5-base_13881_val_avg_bleu=68.1000-step_count=5.ckpt'
+CHECKPOINT = '/home/kandavel/ProVe-main/verbalisation_model.ckpt_OG/val_avg_bleu=68.1000-step_count=5.ckpt'
 MAX_LENGTH = 384
 SEED = 42
 

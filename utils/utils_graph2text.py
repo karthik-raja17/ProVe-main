@@ -4,7 +4,7 @@ import os
 def convert_text(text):
     #return text
     text = text.lower()
-    text = ' '.join(re.split('(\W)', text))
+    text = ' '.join(re.split(r'(\W)', text))
     text = ' '.join(text.split())
     return text
 
