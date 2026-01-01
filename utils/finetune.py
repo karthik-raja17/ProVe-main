@@ -67,8 +67,9 @@ class SummarizationModule(BaseTransformer):
         super().__init__(hparams, num_labels=None, mode=self.mode, **kwargs)
         #use_task_specific_params(self.model, "summarization")
 
-        self.metrics_save_path = Path('/home/ubuntu/RQV/base') / "metrics.json"
-        self.hparams_save_path = Path('/home/ubuntu/RQV/base') / "hparams.pkl"
+        # Set this to your local ProVe-main directory
+        self.metrics_save_path = Path('/home/kandavel/ProVe-main') / "metrics.json"
+        self.hparams_save_path = "/home/kandavel/ProVe-main/hparams.pkl"
         pickle_save(self.hparams, self.hparams_save_path)
         self.step_count = -2
         self.metrics = defaultdict(list)
@@ -593,7 +594,7 @@ def main(args, model=None) -> SummarizationModule:
         early_stopping_callback=es_callback,
         logger=logger,
     )
-    pickle_save(model.hparams, model.output_dir / "hparams.pkl")
+    pickle_save(model.hparams, Path("/home/kandavel/ProVe-main/hparams.pkl"))
     if not args.do_predict:
         return model
 

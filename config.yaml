@@ -1,6 +1,8 @@
 database:
   name: 'wikidata_claims_refs_parsed.db'
   result_db_for_API: './reference_checked.db'
+  mongodb_port: 27018
+  sqlite_path: "/home/kandavel/ProVe-main/prove_database.db"
 
 queue:
   heuristic: 'random'
@@ -15,10 +17,10 @@ spacy:
   model: 'en_core_web_sm'
 
 html_fetching:
-  batch_size: 10
+  fetching_driver: "requests"
+  timeout: 30
+  batch_size: 20
   delay: 1.0
-  fetching_driver: 'chrome'  # available options: 'chrome' or 'requests'
-  timeout: 15
 
 logging:
   level: 'INFO'

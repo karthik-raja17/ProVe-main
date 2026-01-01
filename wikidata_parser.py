@@ -1,15 +1,17 @@
 import ast
 import json
+import logging
+import os
 from typing import List, Dict, Any
-import requests
 
-from qwikidata.linked_data_interface import get_entity_dict_from_api
 import nltk
 import pandas as pd
+import requests
 import yaml
+from qwikidata.linked_data_interface import get_entity_dict_from_api
 
+# Initialize logger
 from utils.logger import logger
-
 
 class Config:
     def __init__(self, config_path: str = 'config.yaml'):
@@ -17,6 +19,8 @@ class Config:
     
     @staticmethod
     def _load_config(config_path: str) -> Dict[str, Any]:
+        if not os.path.exists(config_path):
+            return {'database': {'name': 'prove_database.db'}, 'parsing': {'reset_database': False}}
         with open(config_path, 'r') as file:
             return yaml.safe_load(file)
     
@@ -28,356 +32,204 @@ class Config:
     def reset_database(self) -> bool:
         return self.config.get('parsing', {}).get('reset_database', False)
 
-
 class EntityProcessor:
     def __init__(self):
-        # Store the User-Agent for reference
-        self.user_agent = 'ProVe-Research-Tool/1.0 (https://github.com/your-username/ProVe; research@example.org)'
-    
+        # REQUIRED: Set a descriptive User-Agent to bypass Wikidata 403 Forbidden errors
+        self.user_agent = 'ProVe-Research-Tool/1.1 (https://github.com/karthik-raja17/ProVe; karthikraja2021@gmail.com)'
+        self.session = requests.Session()
+        self.session.headers.update({'User-Agent': self.user_agent})
+
     def process_entity(self, qid: str) -> Dict[str, pd.DataFrame]:
-        """
-        Process Wikidata entity claims and references and return them as DataFrames.
+        """Fetch entity data using Special:EntityData endpoint which is bot-friendly"""
+        url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
         
-        Args:
-            qid: Wikidata entity ID (e.g., 'Q44')
-            
-        Returns:
-            Dictionary containing three DataFrames:
-            - claims: All claim information
-            - claims_refs: Claim-reference relationships
-            - refs: All reference information
-        """
-        # Set the User-Agent globally for this request
-        original_headers = requests.utils.default_headers()
+        # Globally update headers temporarily for library compatibility
+        original_headers = requests.utils.default_headers().copy()
         try:
-            # Temporarily set the User-Agent for this request
-            requests.utils.default_headers().update({
-                'User-Agent': self.user_agent
-            })
+            requests.utils.default_headers().update({'User-Agent': self.user_agent})
             
-            entity = get_entity_dict_from_api(qid)
+            response = self.session.get(url, timeout=30)
+            if response.status_code == 403:
+                logger.error(f"403 Forbidden: Wikidata blocking bot. UA used: {self.user_agent}")
+                return self._empty_return()
+            response.raise_for_status()
+            data = response.json()
+            entity = data.get('entities', {}).get(qid, {})
+        except Exception as e:
+            logger.error(f"API Connection failed for {qid}: {str(e)}")
+            return self._empty_return()
         finally:
             # Restore original headers
+            requests.utils.default_headers().clear()
             requests.utils.default_headers().update(original_headers)
             
         if not entity:
-            logger.warning(f'Failed to fetch entity: {qid}')
-            return {'claims': pd.DataFrame(), 'claims_refs': pd.DataFrame(), 'refs': pd.DataFrame()}
-        
+            return self._empty_return()
+
         claims_data = []
         claims_refs_data = []
         refs_data = []
 
-        # Process all claims and references
-        for claims in entity['claims'].values():
-            for claim in claims:
-                # Extract claim data
-                mainsnak = claim['mainsnak']
-                
-                # Extract object_id and datavalue
-                object_id = None
-                if mainsnak['snaktype'] == 'value':
-                    datavalue = mainsnak['datavalue']
-                    if datavalue['type'] == 'wikibase-entityid':
+        entity_id = entity.get('id', qid)
+        entity_label = entity.get('labels', {}).get('en', {}).get('value', f"No label ({entity_id})")
 
-                        if 'numeric-id' in datavalue['value']:
-                            object_id = f"Q{datavalue['value']['numeric-id']}"
-                        else:
-                            object_id = str(datavalue['value'])
-                    value = str(datavalue)
-                else:
-                    value = mainsnak['snaktype']
+        for property_id, claims in entity.get('claims', {}).items():
+            for claim in claims:
+                mainsnak = claim.get('mainsnak', {})
+                claim_id = claim.get('id')
                 
-                entity_label = (
-                    entity.get('labels', {})
-                    .get('en', {})
-                    .get('value', f"No label ({entity['id']})")
-                )
+                object_id = None
+                value_str = "no-value"
+                
+                if mainsnak.get('snaktype') == 'value':
+                    datavalue = mainsnak.get('datavalue', {})
+                    dv_type = datavalue.get('type')
+                    dv_value = datavalue.get('value')
+                    
+                    if dv_type == 'wikibase-entityid':
+                        object_id = dv_value.get('id') if isinstance(dv_value, dict) else dv_value
+                    value_str = str(datavalue)
+                else:
+                    value_str = mainsnak.get('snaktype', 'unknown')
                 
                 claims_data.append((
-                    entity['id'],
-                    entity_label,
-                    claim['id'],
-                    claim['rank'],
-                    mainsnak['property'],
-                    mainsnak['datatype'],
-                    value,
-                    object_id
+                    entity_id, entity_label, claim_id, claim.get('rank'),
+                    property_id, mainsnak.get('datatype'), value_str, object_id
                 ))
 
-                # Extract reference data
                 if 'references' in claim:
                     for ref in claim['references']:
-                        claims_refs_data.append((claim['id'], ref['hash']))
-                        
-                        for prop_id, snaks in ref['snaks'].items():
+                        ref_hash = ref.get('hash')
+                        claims_refs_data.append((claim_id, ref_hash))
+                        for ref_prop_id, snaks in ref.get('snaks', {}).items():
                             for i, snak in enumerate(snaks):
-                                value = str(snak['datavalue']) if snak['snaktype'] == 'value' else snak['snaktype']
-                                refs_data.append((
-                                    ref['hash'],
-                                    prop_id,
-                                    str(i),
-                                    snak['datatype'],
-                                    value
-                                ))
+                                ref_val = str(snak.get('datavalue')) if snak.get('snaktype') == 'value' else snak.get('snaktype')
+                                refs_data.append((ref_hash, ref_prop_id, str(i), snak.get('datatype'), ref_val))
 
-        # Create and return DataFrames
         return {
-            'claims': pd.DataFrame(claims_data, columns=[
-                'entity_id', 'entity_label', 'claim_id', 'rank',
-                'property_id', 'datatype', 'datavalue', 'object_id'
-            ]),
-            'claims_refs': pd.DataFrame(claims_refs_data, columns=[
-                'claim_id', 'reference_id'
-            ]),
-            'refs': pd.DataFrame(refs_data, columns=[
-                'reference_id', 'reference_property_id', 'reference_index',
-                'reference_datatype', 'reference_value'
-            ])
+            'claims': pd.DataFrame(claims_data, columns=['entity_id', 'entity_label', 'claim_id', 'rank', 'property_id', 'datatype', 'datavalue', 'object_id']),
+            'claims_refs': pd.DataFrame(claims_refs_data, columns=['claim_id', 'reference_id']),
+            'refs': pd.DataFrame(refs_data, columns=['reference_id', 'reference_property_id', 'reference_index', 'reference_datatype', 'reference_value'])
         }
+
+    def _empty_return(self):
+        return {'claims': pd.DataFrame(), 'claims_refs': pd.DataFrame(), 'refs': pd.DataFrame()}
 
 class PropertyFilter:
     def __init__(self):
-        self.bad_datatypes = [
-            'commonsMedia', 'external-id', 'globe-coordinate', 'url', 
-            'wikibase-form', 'geo-shape', 'math', 'musical-notation', 
-            'tabular-data', 'wikibase-sense'
-        ]
+        self.bad_datatypes = ['commonsMedia', 'external-id', 'globe-coordinate', 'url', 'wikibase-form', 'geo-shape', 'math', 'musical-notation', 'tabular-data', 'wikibase-sense']
 
     def filter_properties(self, claims_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Filter claims based on predefined rules
-        
-        Args:
-            claims_df: DataFrame containing claims from EntityProcessor
-            
-        Returns:
-            Filtered DataFrame of claims
-        """
-        if claims_df.empty:
+        if claims_df.empty: 
             return claims_df
             
         original_size = len(claims_df)
         
-        # Apply filters
-        df = claims_df[claims_df['rank'] != 'deprecated']
+        # Keep the rank filter (Standard requirement)
+        df = claims_df[claims_df['rank'] != 'deprecated'].copy()
+        
+        # Keep the basic datatype filter
         df = df[~df['datatype'].isin(self.bad_datatypes)]
         
-        # Load and apply property filters
-        properties_to_remove = self._load_properties_to_remove()
-        df = df[~df['property_id'].isin(properties_to_remove)]
+        # --- TEMPORARY TEST: Comment out the property-id removal ---
+        # properties_to_remove = self._load_properties_to_remove()
+        # if properties_to_remove:
+        #     df = df[~df['property_id'].isin(properties_to_remove)]
         
-        # Filter out special values
-        df = df[~df['datavalue'].isin(['somevalue', 'novalue'])]
-
-        # Log filtering results
-        logger.info(f"Total claims: {original_size}")
-        logger.info(f"Claims after filtering: {len(df)}")
-        logger.info(f"Percentage kept: {len(df)/original_size*100:.2f}%")
-
+        # Keep the null-value filter
+        df = df[~df['datavalue'].astype(str).isin(['somevalue', 'novalue', 'None'])]
+        
+        logger.info(f"Filtering Results: {original_size} -> {len(df)}")
         return df
 
     def _load_properties_to_remove(self) -> List[str]:
-        with open('properties_to_remove.json', 'r') as f:
-            data = json.load(f)
-        return [item['id'] for item in data['general']]
+        try:
+            with open('properties_to_remove.json', 'r') as f:
+                data = json.load(f)
+            return [item['id'] for item in data['general']]
+        except: return []
 
 class URLProcessor:
     def __init__(self):
         self.sparql_endpoint = "https://query.wikidata.org/sparql"
-        self.headers = {
-            'User-Agent': 'ProVe-Research-Tool/1.0 (https://github.com/your-username/ProVe; research@example.org)'
-        }
+        self.headers = {'User-Agent': 'ProVe-Research-Tool/1.1 (karthikraja2021@gmail.com)'}
 
     def get_formatter_url(self, property_id: str) -> str:
-        """Get formatter URL for external ID properties"""
-        sparql_query = f"""
-            SELECT ?formatter_url WHERE {{
-                wd:{property_id} wdt:P1630 ?formatter_url.
-            }}
-        """
-        
+        query = f"SELECT ?formatter_url WHERE {{ wd:{property_id} wdt:P1630 ?formatter_url. }}"
         try:
-            response = requests.get(
-                self.sparql_endpoint,
-                params={
-                    'query': sparql_query,
-                    'format': 'json'
-                },
-                headers=self.headers,
-                timeout=20
-            )
-            response.raise_for_status()
-            
-            results = response.json()
-            if not results.get('results', {}).get('bindings'):
-                logger.warning(f"No formatter URL found for {property_id}")
-                return 'no_formatter_url'
-            return results['results']['bindings'][0]['formatter_url']['value']
-            
-        except requests.Timeout:
-            logger.error(f"Timeout while fetching formatter URL for {property_id}")
-            return 'no_formatter_url'
-        except requests.RequestException as e:
-            logger.error(f"Request error for {property_id}: {e}")
-            return 'no_formatter_url'
-        except Exception as e:
-            logger.error(f"Unexpected error for {property_id}: {e}")
-            return 'no_formatter_url'
+            r = requests.get(self.sparql_endpoint, params={'query': query, 'format': 'json'}, headers=self.headers, timeout=20)
+            return r.json()['results']['bindings'][0]['formatter_url']['value']
+        except: return 'no_formatter_url'
+
+    @staticmethod
+    def _reference_value_to_url(reference_value: str) -> str:
+        """Helper function to clean up stringified JSON reference values."""
+        if reference_value in ['novalue', 'somevalue']:
+            return reference_value
+        try:
+            val = ast.literal_eval(reference_value)
+            if isinstance(val, dict) and 'value' in val:
+                return str(val['value'])
+            return str(val)
+        except:
+            return str(reference_value)
 
     def process_urls(self, filtered_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-        """
-        Process URL references from filtered claims and references
-        
-        Args:
-            filtered_data: Dictionary containing filtered claims and references DataFrames
-            
-        Returns:
-            DataFrame containing processed URL references
-        """
         try:
             claims_df = filtered_data['claims']
             claims_refs_df = filtered_data['claims_refs']
             refs_df = filtered_data['refs']
             
-            if claims_df.empty or refs_df.empty:
-                logger.info("No data to process")
+            if claims_df.empty or refs_df.empty: 
                 return pd.DataFrame()
 
-            # Get references for filtered claims
             valid_claim_ids = claims_df['claim_id'].unique()
             valid_refs = claims_refs_df[claims_refs_df['claim_id'].isin(valid_claim_ids)]
-            
-            if valid_refs.empty:
-                logger.info("No valid references found")
+            if valid_refs.empty: 
                 return pd.DataFrame()
 
-            # Process URLs from valid references
             valid_ref_ids = valid_refs['reference_id'].unique()
-            refs_df = refs_df[refs_df['reference_id'].isin(valid_ref_ids)]
+            refs_subset = refs_df[refs_df['reference_id'].isin(valid_ref_ids)].copy()
             
-            url_data = self._process_reference_urls(refs_df)
+            # 1. Direct URLs
+            url_df = refs_subset[refs_subset['reference_datatype'] == 'url'].copy()
+            if not url_df.empty:
+                url_df['url'] = url_df['reference_value'].apply(self._reference_value_to_url)
             
-            if not url_data.empty:
-                logger.info(f"Processed {len(url_data)} URL references")
-            else:
-                logger.info("No valid URLs found")
+            # 2. External IDs
+            ext_id_df = refs_subset[refs_subset['reference_datatype'] == 'external-id'].copy()
+            if not ext_id_df.empty:
+                ext_id_df['ext_id'] = ext_id_df['reference_value'].apply(self._reference_value_to_url)
+                ext_id_df['formatter_url'] = ext_id_df['reference_property_id'].apply(self.get_formatter_url)
+                ext_id_df = ext_id_df[ext_id_df['formatter_url'] != 'no_formatter_url'].copy()
+                if not ext_id_df.empty:
+                    ext_id_df['url'] = ext_id_df.apply(
+                        lambda x: x['formatter_url'].replace('$1', x['ext_id']), axis=1
+                    )
+            
+            combined_url_data = []
+            if not url_df.empty: combined_url_data.append(url_df)
+            if not ext_id_df.empty: combined_url_data.append(ext_id_df)
+            
+            if not combined_url_data: 
+                return pd.DataFrame()
+            
+            final_url_df = pd.concat(combined_url_data, ignore_index=True)
+            final_url_df = final_url_df.drop_duplicates(subset=['reference_id', 'url'])
 
-            return url_data
+            return final_url_df[['reference_id', 'reference_property_id', 'url']].reset_index(drop=True)
 
         except Exception as e:
-            logger.error(f"Error in URL processing: {e}")
-            raise
-
-    def _process_reference_urls(self, refs_df: pd.DataFrame) -> pd.DataFrame:
-        url_df = self._process_url_references(refs_df)
-        ext_id_df = self._process_external_id_references(refs_df)
-        
-        # Combine and process URLs
-        return self._combine_and_filter_urls(url_df, ext_id_df)
-
-    def _process_url_references(self, refs_df: pd.DataFrame) -> pd.DataFrame:
-        url_df = refs_df[refs_df['reference_datatype'] == 'url'].copy()
-        if not url_df.empty:
-            url_df['url'] = url_df.reference_value.apply(self._reference_value_to_url)
-        return url_df
-
-    def _process_external_id_references(self, refs_df: pd.DataFrame) -> pd.DataFrame:
-        ext_id_df = refs_df[refs_df['reference_datatype'] == 'external-id'].copy()
-        if not ext_id_df.empty:
-            ext_id_df['ext_id'] = ext_id_df.reference_value.apply(self._reference_value_to_url)
-            ext_id_df['formatter_url'] = ext_id_df['reference_property_id'].apply(self.get_formatter_url)
-            ext_id_df['url'] = ext_id_df.apply(
-                lambda x: x['formatter_url'].replace('$1', x['ext_id']) 
-                if x['formatter_url'] != 'no_formatter_url' else 'placeholder',
-                axis=1
-            )
-        return ext_id_df
-
-    @staticmethod
-    def _reference_value_to_url(reference_value: str) -> str:
-        if reference_value in ['novalue', 'somevalue']:
-            return reference_value
-        reference_value = ast.literal_eval(reference_value)
-        assert reference_value['type'] == 'string'
-        return reference_value['value']
-
-    def _combine_and_filter_urls(self, url_df: pd.DataFrame, ext_id_df: pd.DataFrame) -> pd.DataFrame:
-        if url_df.empty and ext_id_df.empty:
+            logger.error(f"Error in process_urls: {e}")
             return pd.DataFrame()
-
-        # Process URL DataFrame
-        url_data = []
-        
-        if not url_df.empty:
-            url_data.append(url_df[['reference_id', 'reference_property_id', 
-                                  'reference_index', 'reference_datatype', 'url']])
-        
-        # Process external ID DataFrame
-        if not ext_id_df.empty and 'formatter_url' in ext_id_df.columns:
-            valid_ext_ids = ext_id_df[ext_id_df['formatter_url'] != 'no_formatter_url'].copy()
-            if not valid_ext_ids.empty:
-                valid_ext_ids['url'] = valid_ext_ids.apply(
-                    lambda x: x['formatter_url'].replace('$1', x['ext_id']), 
-                    axis=1
-                )
-                url_data.append(valid_ext_ids[['reference_id', 'reference_property_id', 
-                                             'reference_index', 'reference_datatype', 'url']])
-        
-        # Combine all URL data
-        if not url_data:
-            return pd.DataFrame()
-        
-        all_url_df = pd.concat(url_data, ignore_index=True)
-        
-        # Apply filters and sorting
-        all_url_df = all_url_df.sort_values(['reference_id', 'reference_index']).reset_index(drop=True)
-        
-        # Get references with single URL
-        reference_id_counts = all_url_df.reference_id.value_counts()
-        single_url_references = reference_id_counts[reference_id_counts == 1].index
-        url_data = all_url_df[all_url_df.reference_id.isin(single_url_references)]
-        
-        if not url_data.empty:
-            url_data = url_data.drop('reference_index', axis=1).reset_index(drop=True)
-            
-        return url_data
 
     def get_labels_from_sparql(self, entity_ids: List[str]) -> Dict[str, str]:
-        """
-        Get labels for entities using SPARQL
-        """
-        endpoint_url = "https://query.wikidata.org/sparql"
-        
-        # Prepare the SPARQL query for a single entity
-        query = f"""
-        SELECT ?id ?label WHERE {{
-          wd:{entity_ids[0]} rdfs:label ?label .
-          BIND(wd:{entity_ids[0]} AS ?id)
-          FILTER(LANG(?label) = "en" || LANG(?label) = "mul")
-        }}
-        """
-        
+        if not entity_ids: return {}
+        query = f"SELECT ?id ?label WHERE {{ wd:{entity_ids[0]} rdfs:label ?label . FILTER(LANG(?label) = 'en') BIND(wd:{entity_ids[0]} AS ?id) }}"
         try:
-            r = requests.get(endpoint_url, 
-                            params={'format': 'json', 'query': query},
-                            headers=self.headers,
-                            timeout=20)
-            r.raise_for_status()
-            results = r.json()
-            
-            # Create dictionary for labels
-            labels = {}
-            for result in results['results']['bindings']:
-                label = result['label']['value']
-                entity_id = result['id']['value'].split('/')[-1]
-                labels[entity_id] = label
-            
-            return labels
-            
-        except Exception as e:
-            logger.error(f"Error fetching labels: {e}")
-            return {}
+            r = requests.get(self.sparql_endpoint, params={'format': 'json', 'query': query}, headers=self.headers, timeout=20)
+            return {res['id']['value'].split('/')[-1]: res['label']['value'] for res in r.json()['results']['bindings']}
+        except: return {}
 
 class WikidataParser:
     def __init__(self, config_path: str = 'config.yaml'):
@@ -385,71 +237,34 @@ class WikidataParser:
         self.entity_processor = EntityProcessor()
         self.property_filter = PropertyFilter()
         self.url_processor = URLProcessor()
-        self.processing_stats = {}  # Dictionary to store processing statistics
+        self.processing_stats = {}
 
     def process_entity(self, qid: str) -> Dict[str, pd.DataFrame]:
-        """Process a single entity with its QID."""
-        try:
-            # Track statistics without affecting the return structure
-            self.processing_stats = {
-                'entity_id': qid,
-                'parsing_start_timestamp': pd.Timestamp.now(),
-                'total_claims': 0,
-                'filtered_claims': 0,
-                'percentage_kept': 0.0,
-                'url_references': 0
-            }
-            
-            logger.info(f"Starting to process entity: {qid}")
-            
-            entity_data = self.entity_processor.process_entity(qid)
-            total_claims = len(entity_data['claims'])
-            self.processing_stats['total_claims'] = total_claims
-            
-            filtered_claims = self.property_filter.filter_properties(entity_data['claims'])
-            filtered_claims_count = len(filtered_claims)
-            self.processing_stats['filtered_claims'] = filtered_claims_count
-            self.processing_stats['percentage_kept'] = (filtered_claims_count / total_claims * 100) if total_claims > 0 else 0
-            
-            # Fix "No label" entity labels
-            if not filtered_claims.empty and filtered_claims['entity_label'].iloc[0].startswith('No label'):
-                # Get the unique entity_id
-                entity_id = filtered_claims['entity_id'].iloc[0]
-                
-                # Fetch the label using SPARQL
-                missing_labels = self.url_processor.get_labels_from_sparql([entity_id])
-                
-                # Update the label if it exists
-                if entity_id in missing_labels:
-                    filtered_claims['entity_label'] = missing_labels[entity_id]
-            
-            result = {
-                'claims': filtered_claims,
-                'claims_refs': entity_data['claims_refs'],
-                'refs': entity_data['refs']
-            }
-            
-            url_data = self.url_processor.process_urls(result)
-            self.processing_stats['url_references'] = len(url_data)
-            
-            result['urls'] = url_data
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Failed to process entity {qid}: {str(e)}", exc_info=True)
-            raise
+        self.processing_stats = {'entity_id': qid, 'parsing_start_timestamp': pd.Timestamp.now()}
+        
+        entity_data = self.entity_processor.process_entity(qid)
+        total_claims = len(entity_data['claims'])
+        
+        filtered_claims = self.property_filter.filter_properties(entity_data['claims'])
+        
+        if not filtered_claims.empty and filtered_claims['entity_label'].iloc[0].startswith('No label'):
+            label_map = self.url_processor.get_labels_from_sparql([filtered_claims['entity_id'].iloc[0]])
+            if qid in label_map: filtered_claims['entity_label'] = label_map[qid]
 
-    # Add new method to access statistics
+        result = {'claims': filtered_claims, 'claims_refs': entity_data['claims_refs'], 'refs': entity_data['refs']}
+        
+        url_data = self.url_processor.process_urls(result)
+        result['urls'] = url_data
+        
+        self.processing_stats['total_claims'] = total_claims
+        self.processing_stats['url_references'] = len(url_data)
+        
+        return result
+
     def get_processing_stats(self) -> Dict:
-        """Return the processing statistics from the last entity processed"""
         return self.processing_stats
 
-
-
 if __name__ == "__main__":
-    nltk.download('punkt', quiet=True)
-
     parser = WikidataParser()
-    result = parser.process_entity('Q51896665')
-    stats = parser.get_processing_stats()#result.keys() = dict_keys(['claims', 'claims_refs', 'refs', 'urls'])
+    res = parser.process_entity('Q76')
+    print(f"Processed entity. Found {len(res['urls'])} reference URLs.")

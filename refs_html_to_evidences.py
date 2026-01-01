@@ -1,10 +1,11 @@
 """
-Fixed HTML to Evidence processor with correct NLTK path
+Fixed HTML to Evidence processor with correct NLTK path and List/DataFrame compatibility
 """
 import nltk
 import os
 import re
 import pandas as pd
+import numpy as np
 from bs4 import BeautifulSoup
 from utils.logger import logger
 
@@ -17,15 +18,22 @@ try:
     nltk.data.find('tokenizers/punkt', paths=[nltk_data_dir])
 except LookupError:
     nltk.download('punkt', quiet=True, download_dir=nltk_data_dir)
+try:
+    nltk.data.find('tokenizers/punkt_tab', paths=[nltk_data_dir])
+except LookupError:
+    nltk.download('punkt_tab', quiet=True, download_dir=nltk_data_dir)
 
 class HTMLSentenceProcessor:
     def __init__(self):
         # Set NLTK data path
-        nltk.data.path.append(nltk_data_dir)
+        if nltk_data_dir not in nltk.data.path:
+            nltk.data.path.append(nltk_data_dir)
         
     def html_to_text(self, html_content):
         """Extract clean text from HTML"""
         try:
+            if not html_content:
+                return ""
             soup = BeautifulSoup(html_content, 'html.parser')
             
             # Remove script and style elements
@@ -46,19 +54,22 @@ class HTMLSentenceProcessor:
     def text_to_sentences(self, text):
         """Split text into sentences using NLTK"""
         try:
+            if not text:
+                return []
             sentences = nltk.tokenize.sent_tokenize(text)
             # Filter out very short sentences
             sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
             return sentences
         except Exception as e:
             logger.error(f"Error tokenizing sentences: {e}")
-            return []
+            # Fallback split if NLTK fails
+            return [s.strip() for s in text.split('.') if len(s.strip()) > 20]
     
     def process_html_to_sentences(self, html_df):
         """Process HTML DataFrame and extract sentences"""
         sentences_data = []
         for idx, row in html_df.iterrows():
-            if row['status'] == 200 and row['html'] is not None:
+            if row['status'] == 200 and row.get('html') is not None:
                 # Convert HTML to text
                 text_content = self.html_to_text(row["html"])
                 # Convert text to sentences
@@ -83,73 +94,89 @@ class EvidenceSelector:
         
         self.verb_module = verb_module
     
-    def select_relevant_sentences(self, verbalized_claims_df, sentences_df, top_k=5):
+    def select_relevant_sentences(self, verbalized_claims, sentences_df, top_k=5):
         """
-        Select most relevant sentences for each verbalized claim
-        
-        Args:
-            verbalized_claims_df: DataFrame with 'verbalized_claim' column
-            sentences_df: DataFrame with 'sentence' column
-            top_k: Number of top sentences to return per claim
-        
-        Returns:
-            DataFrame with evidence sentences and similarity scores
+        Select most relevant sentences for each verbalized claim.
+        Handles DataFrames, Lists, and even single Strings.
         """
-        if verbalized_claims_df.empty or sentences_df.empty:
+        if sentences_df is None or sentences_df.empty:
             return pd.DataFrame()
+
+        # 1. Normalize input to a list of dictionaries
+        claims_to_process = []
         
+        if isinstance(verbalized_claims, str):
+            claims_to_process = [{'verbalized_claim': verbalized_claims}]
+        elif isinstance(verbalized_claims, list):
+            if not verbalized_claims: return pd.DataFrame()
+            claims_to_process = [{'verbalized_claim': c} for c in verbalized_claims]
+        elif isinstance(verbalized_claims, pd.DataFrame):
+            if verbalized_claims.empty: return pd.DataFrame()
+            claims_to_process = verbalized_claims.to_dict(orient='records')
+        elif isinstance(verbalized_claims, pd.Series):
+            claims_to_process = [{'verbalized_claim': c} for c in verbalized_claims.tolist()]
+        else:
+            logger.error(f"Unsupported type for verbalized_claims: {type(verbalized_claims)}")
+            return pd.DataFrame()
+
         evidence_data = []
         
-        # Get all sentences
+        # Get all sentences from the HTML pool
         sentences = sentences_df['sentence'].tolist()
         if not sentences:
             return pd.DataFrame()
         
-        # Encode all sentences once for efficiency
+        # 2. Encode all pool sentences once for efficiency
         try:
-            sentence_embeddings = self.model.encode(sentences, convert_to_tensor=True)
+            # UPDATED: Use the internal .model.encode
+            sentence_embeddings = self.model.model.encode(sentences, convert_to_tensor=True)
         except Exception as e:
-            logger.error(f"Error encoding sentences: {e}")
+            logger.error(f"Error encoding sentence pool: {e}")
             return pd.DataFrame()
         
-        for _, claim_row in verbalized_claims_df.iterrows():
-            # Use verbalized claim text
-            claim_text = claim_row.get('verbalized_claim', '')
+        # 3. Process each claim
+        for claim_dict in claims_to_process:
+            claim_text = claim_dict.get('verbalized_claim', '')
             if not claim_text:
                 continue
             
             try:
-                # Encode the claim
-                claim_embedding = self.model.encode([claim_text], convert_to_tensor=True)
+                # UPDATED: Encode the individual claim using internal .model.encode
+                claim_embedding = self.model.model.encode([claim_text], convert_to_tensor=True)
                 
                 # Compute similarity
                 from sentence_transformers import util
                 similarities = util.cos_sim(claim_embedding, sentence_embeddings)[0]
                 
-                # Get top-k sentences
-                import numpy as np
+                # Get top-k indices
                 top_indices = np.argsort(similarities.cpu())[-top_k:][::-1]
                 
                 # Create evidence entries
                 for i in top_indices:
                     similarity_score = float(similarities[i])
-                    evidence_data.append({
-                        'claim_id': claim_row.get('claim_id', ''),
+                    
+                    # Base entry
+                    entry = {
                         'verbalized_claim': claim_text,
                         'sentence': sentences[i],
                         'similarity_score': similarity_score,
-                        'entity_id': claim_row.get('entity_id', ''),
-                        'property_id': claim_row.get('property_id', ''),
-                        'object_id': claim_row.get('object_id', ''),
-                        'entity_label': claim_row.get('entity_label', ''),
-                        'property_label': claim_row.get('property_label', ''),
-                        'object_label': claim_row.get('object_label', ''),
                         'url': sentences_df.iloc[i]['url'] if 'url' in sentences_df.columns else '',
                         'reference_id': sentences_df.iloc[i].get('reference_id', '')
-                    })
+                    }
+                    
+                    # Map metadata from claim_dict if it exists
+                    metadata_keys = [
+                        'claim_id', 'entity_id', 'property_id', 'object_id', 
+                        'entity_label', 'property_label', 'object_label'
+                    ]
+                    for key in metadata_keys:
+                        if key in claim_dict:
+                            entry[key] = claim_dict[key]
+                    
+                    evidence_data.append(entry)
                     
             except Exception as e:
-                logger.error(f"Error processing claim {claim_row.get('claim_id', '')}: {e}")
+                logger.error(f"Error processing claim encoding: {e}")
                 continue
         
         return pd.DataFrame(evidence_data) if evidence_data else pd.DataFrame()
@@ -169,7 +196,6 @@ class EvidenceSelector:
             similarities = util.cos_sim(claim_embedding, sentence_embeddings)[0]
             
             # Get top-k sentences
-            import numpy as np
             top_indices = np.argsort(similarities.cpu())[-top_k:][::-1]
             evidence = [(sentences[i], float(similarities[i])) for i in top_indices]
             

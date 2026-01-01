@@ -1,5 +1,5 @@
 import pandas as pd
-
+import logging
 from wikidata_parser import WikidataParser
 from refs_html_collection import HTMLFetcher
 from refs_html_to_evidences import HTMLSentenceProcessor, EvidenceSelector
@@ -8,89 +8,83 @@ from utils.textual_entailment_module import TextualEntailmentModule
 from utils.sentence_retrieval_module import SentenceRetrievalModule
 from utils.verbalisation_module import VerbModule
 
+# Setup logging to match your console output
+logger = logging.getLogger("prove")
+
 def initialize_models():
-    """Initialize all required models once"""
+    """Initialize all required models once on the reserved GPU"""
     text_entailment = TextualEntailmentModule()
     sentence_retrieval = SentenceRetrievalModule()
     verb_module = VerbModule()
     return text_entailment, sentence_retrieval, verb_module
 
 def process_entity(qid: str, models: tuple) -> tuple:
-    """
-    Process a single entity with pre-loaded models
-    """
     text_entailment, sentence_retrieval, verb_module = models
     
-    # Get URLs and claims
+    # 1. Parsing
     parser = WikidataParser()
     parser_result = parser.process_entity(qid)
     parser_stats = parser.get_processing_stats()
     
-    # Check if URLs exist
-    if 'urls' not in parser_result or parser_result['urls'].empty:
-        # Return empty DataFrames and parser stats
-        empty_df = pd.DataFrame()
-        empty_results = pd.DataFrame()
-        return empty_df, empty_results, parser_stats
+    if parser_result['claims'].empty or parser_result['urls'].empty:
+        return pd.DataFrame(), pd.DataFrame(), parser_stats
     
-    # Initialize processors - FIXED: Correct EvidenceSelector initialization
-    selector = EvidenceSelector(
-        sentence_retrieval=sentence_retrieval,  # Pass the actual model, not string
-        verb_module=verb_module
-    )
-    checker = ClaimEntailmentChecker(text_entailment=text_entailment)
+    # 2. Verbalization (Returns a LIST of strings)
+    logger.info(f"Verbalizing {len(parser_result['claims'])} claims...")
+    verbalized_claims_list = verb_module.verbalise_claims(parser_result['claims'])
     
-    # Fetch HTML content
+    # FIX: Use len() instead of .empty for the list
+    if not verbalized_claims_list or len(verbalized_claims_list) == 0:
+        logger.error(f"Verbalization failed for {qid}")
+        return pd.DataFrame(), pd.DataFrame(), parser_stats
+
+    # 3. HTML Fetching
     fetcher = HTMLFetcher(config_path='config.yaml')
     html_df = fetcher.fetch_all_html(parser_result['urls'], parser_result)
     
-    # Check if there are any successful (status 200) URLs
-    if not (html_df['status'] == 200).any():
-        # Return current html_df with failed fetches, empty results and parser stats
-        empty_results = pd.DataFrame()
-        return html_df, empty_results, parser_stats
+    success_count = len(html_df[html_df['status'] == 200])
+    logger.info(f"HTML Fetching Result: {success_count} pages downloaded.")
 
-    # VERBALIZATION: Convert raw triples to natural language
-    # Check if verbalize_claims method exists, otherwise use fallback
-    if hasattr(verb_module, 'verbalize_claims'):
-        verbalized_claims = verb_module.verbalize_claims(parser_result['claims'])
-    else:
-        # Fallback: create simple verbalized claims
-        verbalized_claims = parser_result['claims'].copy()
-        verbalized_claims['verbalized_claim'] = verbalized_claims.apply(
-            lambda row: f"{row['entity_label']} {row['property_label']} {row['object_label']}", 
-            axis=1
-        )
-    
-    # Convert HTML to sentences
+    if html_df.empty or success_count == 0:
+        return html_df, pd.DataFrame(), parser_stats
+
+    # 4. Sentence Processing
     processor = HTMLSentenceProcessor()
     sentences_data = []
-    for idx, row in html_df.iterrows():
-        if row['status'] == 200 and row['html'] is not None:
-            # Convert HTML to text
-            text_content = processor.html_to_text(row["html"])
-            # Convert text to sentences
-            sentences = processor.text_to_sentences(text_content)
-            for sent in sentences:
-                sentences_data.append({
-                    "url": row["url"],
-                    "sentence": sent,
-                    "html": row["html"]
-                })
-    sentences_df = pd.DataFrame(sentences_data) if sentences_data else pd.DataFrame()
+    for _, row in html_df.iterrows():
+        if row['status'] == 200 and row['html']:
+            try:
+                text_content = processor.html_to_text(row["html"])
+                sentences = processor.text_to_sentences(text_content)
+                for sent in sentences:
+                    sentences_data.append({"url": row["url"], "sentence": sent, "reference_id": row.get("reference_id")})
+            except Exception as e:
+                logger.error(f"Sentence error: {e}")
+
+    if not sentences_data:
+        return html_df, pd.DataFrame(), parser_stats
     
-    # Process evidence selection with VERBALIZED claims
-    evidence_df = selector.select_relevant_sentences(verbalized_claims, sentences_df)
+    sentences_df = pd.DataFrame(sentences_data)
     
-    # Check entailment with metadata
+    # 5. Evidence Selection
+    selector = EvidenceSelector(sentence_retrieval=sentence_retrieval, verb_module=verb_module)
+    
+    # Convert list to Series so internal .empty calls work
+    verbalized_series = pd.Series(verbalized_claims_list)
+    
+    evidence_df = selector.select_relevant_sentences(verbalized_series, sentences_df)
+    logger.info(f"Evidence Selection: Found {len(evidence_df)} relevant candidates.")
+    
+    # 6. Entailment
+    checker = ClaimEntailmentChecker(text_entailment=text_entailment)
     entailment_results = checker.process_entailment(evidence_df, html_df, qid)
     
     return html_df, entailment_results, parser_stats
 
-# ... (all your existing imports and function definitions for initialize_models and process_entity)
-
 if __name__ == "__main__":
-    # Your 30 Diverse Instances
+    # Your reservation on circa01: GPU 2
+    # Ensure indices are set to 0 in modules as discussed for Visibility masking
+    
     DIVERSE_WIKIDATA_INSTANCES = {
         "Q2277": "Roman Empire", "Q76": "Barack Obama", "Q9682": "Volodymyr Zelenskyy",
         "Q312": "Angela Merkel", "Q23": "George Washington", "Q142": "Margaret Thatcher",
@@ -104,35 +98,28 @@ if __name__ == "__main__":
         "Q16": "Canada", "Q39": "Switzerland", "Q40": "Austria"
     }
 
-    # 1. Initialize models ONCE locally
-    # No need to import from ProVe_main_process; just call the function defined above.
+    # Load models once
     models = initialize_models() 
-    
     all_results = []
 
-    print(f"Starting batch processing for {len(DIVERSE_WIKIDATA_INSTANCES)} entities...")
-
-    # 2. Iterate through the dictionary
     for qid, label in DIVERSE_WIKIDATA_INSTANCES.items():
-        print(f"Processing {label} ({qid})...")
+        print(f"\n--- Processing {label} ({qid}) ---")
         try:
-            # 3. Call the function directly from this script
             html_df, entailment_results, parser_stats = process_entity(qid, models)
             
             if not entailment_results.empty:
-                # Add metadata to track which entity the results belong to
                 entailment_results['batch_entity_qid'] = qid
                 entailment_results['batch_entity_label'] = label
                 all_results.append(entailment_results)
-                print(f"Successfully processed {len(entailment_results)} claims for {label}.")
+                print(f"DONE: Found {len(entailment_results)} verifiable claims.")
             else:
-                print(f"No claims with valid references found for {label}.")
+                print(f"SKIP: No verifiable evidence found for {label}.")
                 
         except Exception as e:
-            print(f"Error processing {label}: {e}")
+            print(f"CRITICAL ERROR for {label}: {e}")
 
-    # 4. Save combined results to a single local CSV
+    # Final Output
     if all_results:
         final_df = pd.concat(all_results, ignore_index=True)
         final_df.to_csv("batch_results.csv", index=False)
-        print(f"Batch complete. Results saved to batch_results.csv")
+        print(f"\nBatch complete. Combined results saved to batch_results.csv")
