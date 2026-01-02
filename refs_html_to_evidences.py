@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 from bs4 import BeautifulSoup
 from utils.logger import logger
+from sentence_transformers import util
 
 # Set NLTK data path
 nltk_data_dir = os.path.expanduser('~/nltk_data')
@@ -92,6 +93,9 @@ class EvidenceSelector:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(model_name)
         
+        if hasattr(self.model, 'max_seq_length'):
+            self.model.max_seq_length = 512
+
         self.verb_module = verb_module
     
     def select_relevant_sentences(self, verbalized_claims, sentences_df, top_k=5):
@@ -128,8 +132,12 @@ class EvidenceSelector:
         
         # 2. Encode all pool sentences once for efficiency
         try:
-            # UPDATED: Use the internal .model.encode
-            sentence_embeddings = self.model.model.encode(sentences, convert_to_tensor=True)
+            # REMOVE truncation=True from here
+            sentence_embeddings = self.model.model.encode(
+                sentences, 
+                convert_to_tensor=True, 
+                show_progress_bar=False
+            )
         except Exception as e:
             logger.error(f"Error encoding sentence pool: {e}")
             return pd.DataFrame()
@@ -141,11 +149,15 @@ class EvidenceSelector:
                 continue
             
             try:
-                # UPDATED: Encode the individual claim using internal .model.encode
-                claim_embedding = self.model.model.encode([claim_text], convert_to_tensor=True)
+                # REMOVE truncation=True from here as well
+                claim_embedding = self.model.model.encode(
+                    [claim_text], 
+                    convert_to_tensor=True,
+                    show_progress_bar=False
+                )
                 
                 # Compute similarity
-                from sentence_transformers import util
+                
                 similarities = util.cos_sim(claim_embedding, sentence_embeddings)[0]
                 
                 # Get top-k indices
