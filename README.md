@@ -98,3 +98,4 @@ The `config.yaml` file contains important settings:
 7. Results are stored in the database
 
 
+Check contribution graph
