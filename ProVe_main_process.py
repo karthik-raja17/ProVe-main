@@ -1,3 +1,10 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"  # Force it here
+import torch
+
+print(f"CUDA Available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"Current GPU: {torch.cuda.get_device_name(0)}")
 import pandas as pd
 import logging
 from wikidata_parser import WikidataParser

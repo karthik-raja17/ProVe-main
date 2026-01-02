@@ -6,8 +6,10 @@ import torch
 from transformers import BertTokenizer, BertForSequenceClassification, pipeline
 import numpy as np
 import re
+import os
 
-DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"DEBUG: Textual Entailment moving to: {device}")
 MAX_LEN = 512
 
 class TextualEntailmentModule():
@@ -19,7 +21,8 @@ class TextualEntailmentModule():
     ):
         self.tokenizer = BertTokenizer.from_pretrained(tokenizer_path)
         self.model = BertForSequenceClassification.from_pretrained(model_path)
-        self.model.to(DEVICE) # Uses 'cuda:2' if available
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(device)
     
     def check_entailment(self, premise, hypothesis):
         """Check if premise entails hypothesis"""

@@ -9,7 +9,8 @@ import os
 from utils.logger import logger
 
 # Hard-coded for the Eurecom cluster allocation (GPU index 0)
-DEVICE = torch.device('cuda:0')
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.info(f"Sentence Retrieval Module initialized on {DEVICE}")
 
 class SentenceRetrievalModule:
     def __init__(self, model_path='/home/kandavel/ProVe-main/sentence_retrieval_pytorch_bert_base_model_OG'):

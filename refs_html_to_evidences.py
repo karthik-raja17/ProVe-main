@@ -9,6 +9,7 @@ import numpy as np
 from bs4 import BeautifulSoup
 from utils.logger import logger
 from sentence_transformers import util
+import torch
 
 # Set NLTK data path
 nltk_data_dir = os.path.expanduser('~/nltk_data')
@@ -53,18 +54,33 @@ class HTMLSentenceProcessor:
             return ""
     
     def text_to_sentences(self, text):
-        """Split text into sentences using NLTK"""
+        """Split text and HARD LIMIT character count to prevent CUDA crashes"""
         try:
             if not text:
                 return []
+            
+            # Use 'sentences' consistently to avoid NameError
             sentences = nltk.tokenize.sent_tokenize(text)
-            # Filter out very short sentences
-            sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
-            return sentences
+            
+            valid_sentences = []
+            for s in sentences:
+                clean_s = s.strip()
+                
+                # 1. Skip tiny noise fragments
+                if len(clean_s) < 20:
+                    continue
+                
+                # 2. Hard limit: 500 characters is safely ~150 tokens.
+                # This stays well below the 512-token limit of BERT models.
+                if len(clean_s) > 500:
+                    valid_sentences.append(clean_s[:500])
+                else:
+                    valid_sentences.append(clean_s)
+                    
+            return valid_sentences
         except Exception as e:
-            logger.error(f"Error tokenizing sentences: {e}")
-            # Fallback split if NLTK fails
-            return [s.strip() for s in text.split('.') if len(s.strip()) > 20]
+            logger.error(f"Tokenization error: {e}")
+            return []
     
     def process_html_to_sentences(self, html_df):
         """Process HTML DataFrame and extract sentences"""
@@ -86,16 +102,26 @@ class HTMLSentenceProcessor:
 
 class EvidenceSelector:
     def __init__(self, sentence_retrieval=None, verb_module=None, model_name='all-MiniLM-L6-v2'):
-        # Use provided sentence retrieval model or create new one
+        # 1. Load the model
         if sentence_retrieval is not None:
             self.model = sentence_retrieval
         else:
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(model_name)
         
-        if hasattr(self.model, 'max_seq_length'):
-            self.model.max_seq_length = 512
-
+        # 2. Identify the internal SentenceTransformer object
+        # Your wrapper (SentenceRetrievalModule) holds the actual model in .model
+        self.actual_transformer = self.model.model if hasattr(self.model, 'model') else self.model
+        
+        # 3. FORCE Truncation Limits
+        # This is the "Magic Fix" for the vectorized_gather_kernel error
+        self.actual_transformer.max_seq_length = 256 
+        
+        # 4. Ensure it's on the correct device (logical cuda:0)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.actual_transformer.to(self.device)
+        
+        logger.info(f"Retriever initialized on {self.device} with max_seq_length: {self.actual_transformer.max_seq_length}")
         self.verb_module = verb_module
     
     def select_relevant_sentences(self, verbalized_claims, sentences_df, top_k=5):
