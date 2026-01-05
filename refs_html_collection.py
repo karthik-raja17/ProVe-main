@@ -8,6 +8,7 @@ from selenium.webdriver.chrome.options import Options
 import pandas as pd
 
 from utils.logger import logger
+from pymongo import MongoClient
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -31,10 +32,11 @@ class HTMLFetcher:
 
     def __init__(self, config_path: str = 'config.yaml'):
         """Initialize HTMLFetcher with configuration and private MongoDB"""
-        from pymongo import MongoClient
         
         # 1. Connect to your private port
-        self.client = MongoClient('mongodb://localhost:27018/', serverSelectionTimeoutMS=2000)
+        self.client = None
+        self.collection = None
+        logger.info("⚠️ MongoDB caching is manually disabled.")
         self.db = self.client['prove_cache']  # Database name
         self.collection = self.db['html_content']  # Collection name
         
@@ -99,7 +101,7 @@ class HTMLFetcher:
             return f"Error: {str(e)}"
 
     def fetch_all_html(self, url_df: pd.DataFrame, parser_result: Dict) -> pd.DataFrame:
-        """Fetch HTML with MongoDB caching support and forced requests fetching logic"""
+        """Fetch HTML with a GUARANTEED bypass for MongoDB NoneType errors"""
         result_df = url_df.copy()
         result_df['html'] = None
         result_df['status'] = None
@@ -109,17 +111,18 @@ class HTMLFetcher:
         for i, (idx, row) in enumerate(result_df.iterrows()):
             url = row['url']
             
-            # 1. Check MongoDB Cache first
-            try:
-                cached_data = self.collection.find_one({"url": url})
-                if cached_data:
-                    result_df.at[idx, 'html'] = cached_data['html']
-                    result_df.at[idx, 'status'] = 200
-                    result_df.at[idx, 'fetch_timestamp'] = cached_data.get('timestamp')
-                    logger.info(f"📦 Loaded from cache: {url}")
-                    continue
-            except Exception as e:
-                logger.warning(f"Cache lookup failed for {url}: {e}")
+            # 1. SKIP CACHE CHECK - If collection is None, we just skip to fetching
+            if self.collection is not None:
+                try:
+                    cached_data = self.collection.find_one({"url": url})
+                    if cached_data:
+                        result_df.at[idx, 'html'] = cached_data['html']
+                        result_df.at[idx, 'status'] = 200
+                        result_df.at[idx, 'fetch_timestamp'] = cached_data.get('timestamp')
+                        logger.info(f"📦 Loaded from cache: {url}")
+                        continue
+                except Exception as e:
+                    logger.warning(f"Cache lookup failed: {e}")
 
             # 2. Rate limiting
             if i > 0 and i % self.batch_size == 0:
@@ -129,25 +132,23 @@ class HTMLFetcher:
             logger.info(f"🌐 Fetching: {url}")
             try:
                 fetch_start_time = pd.Timestamp.now()
-                
-                # FORCE REQUESTS HERE - Calling your requests helper
                 html = self.fetch_html_with_requests(url)
                 
                 if html and "Error:" not in html:
                     status = 200
-                    # 4. Save to MongoDB Cache
-                    self.collection.update_one(
-                        {"url": url},
-                        {"$set": {
-                            "url": url,
-                            "html": html,
-                            "timestamp": fetch_start_time
-                        }},
-                        upsert=True
-                    )
+                    # 4. SKIP CACHE SAVE - Only save if collection exists
+                    if self.collection is not None:
+                        try:
+                            self.collection.update_one(
+                                {"url": url},
+                                {"$set": {"url": url, "html": html, "timestamp": fetch_start_time}},
+                                upsert=True
+                            )
+                        except:
+                            pass
                 else:
-                    status = 500 # Mark as failure or specific error code if extracted
-                    logger.error(f"Fetch failed for {url}: {html}")
+                    status = 500
+                    logger.error(f"Fetch failed for {url}")
 
                 result_df.at[idx, 'html'] = html
                 result_df.at[idx, 'status'] = status
@@ -156,7 +157,6 @@ class HTMLFetcher:
             except Exception as e:
                 logger.error(f"Failed to process {url}: {e}")
                 result_df.at[idx, 'status'] = 500
-                result_df.at[idx, 'html'] = f"Error: {str(e)}"
 
         return result_df
 

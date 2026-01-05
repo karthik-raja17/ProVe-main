@@ -105,6 +105,9 @@ if __name__ == "__main__":
         "Q16": "Canada", "Q39": "Switzerland", "Q40": "Austria"
     }
 
+    # Output file configuration
+    output_file = "batch_results.csv"
+
     # Load models once
     models = initialize_models() 
     all_results = []
@@ -115,18 +118,34 @@ if __name__ == "__main__":
             html_df, entailment_results, parser_stats = process_entity(qid, models)
             
             if not entailment_results.empty:
+                # Add metadata
                 entailment_results['batch_entity_qid'] = qid
                 entailment_results['batch_entity_label'] = label
+                
+                # --- LIVE SAVE LOGIC ---
+                # Check if file exists to determine if we need to write the header
+                file_exists = os.path.isfile(output_file)
+                
+                # Append to CSV (mode='a')
+                entailment_results.to_csv(
+                    output_file, 
+                    mode='a', 
+                    index=False, 
+                    header=not file_exists
+                )
+                
                 all_results.append(entailment_results)
-                print(f"DONE: Found {len(entailment_results)} verifiable claims.")
+                print(f"DONE: Found {len(entailment_results)} verifiable claims. Saved to {output_file}")
             else:
                 print(f"SKIP: No verifiable evidence found for {label}.")
                 
         except Exception as e:
+            # This catches the 'NoneType' error or network errors without stopping the whole loop
             print(f"CRITICAL ERROR for {label}: {e}")
+            logger.error(f"Stack trace for {label}:", exc_info=True)
 
-    # Final Output
+    # Final Summary
     if all_results:
-        final_df = pd.concat(all_results, ignore_index=True)
-        final_df.to_csv("batch_results.csv", index=False)
-        print(f"\nBatch complete. Combined results saved to batch_results.csv")
+        print(f"\nBatch complete. All processed results are available in {output_file}")
+    else:
+        print("\nBatch finished with no results found.")
