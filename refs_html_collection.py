@@ -31,22 +31,37 @@ class HTMLFetcher:
     }
 
     def __init__(self, config_path: str = 'config.yaml'):
-        """Initialize HTMLFetcher with configuration and private MongoDB"""
+        """Initialize HTMLFetcher with configuration and optional MongoDB"""
+        from pymongo import MongoClient
         
-        # 1. Connect to your private port
+        # 1. Default everything to None for safety
         self.client = None
+        self.db = None
         self.collection = None
-        logger.info("⚠️ MongoDB caching is manually disabled.")
-        self.db = self.client['prove_cache']  # Database name
-        self.collection = self.db['html_content']  # Collection name
         
-        # 2. Verify connection
-        try:
-            self.client.server_info()
-            logger.info("✅ Connected to private MongoDB on port 27018")
-        except Exception as e:
-            logger.error(f"❌ MongoDB connection failed: {e}. Caching will be disabled.")
+        # ⚠️ MANUAL TOGGLE: Keep this False since you don't have MongoDB running
+        enable_mongodb = False 
         
+        if enable_mongodb:
+            try:
+                # Connect to your private port
+                self.client = MongoClient('mongodb://localhost:27018/', serverSelectionTimeoutMS=2000)
+                # Verify connection
+                self.client.server_info()
+                
+                self.db = self.client['prove_cache']
+                self.collection = self.db['html_content']
+                logger.info("✅ Connected to private MongoDB on port 27018")
+            except Exception as e:
+                logger.error(f"❌ MongoDB connection failed: {e}. Caching will be disabled.")
+                # Reset to None if connection fails
+                self.client = None
+                self.db = None
+                self.collection = None
+        else:
+            logger.info("⚠️ MongoDB caching is manually disabled.")
+
+        # 2. Load other configurations
         self.config = load_config(config_path)
         self.fetching_driver = self.config.get('html_fetching', {}).get('fetching_driver', 'requests')
         self.batch_size = self.config.get('html_fetching', {}).get('batch_size', 20)

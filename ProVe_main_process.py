@@ -44,6 +44,25 @@ def process_entity(qid: str, models: tuple) -> tuple:
     if not verbalized_claims_list or len(verbalized_claims_list) == 0:
         logger.error(f"Verbalization failed for {qid}")
         return pd.DataFrame(), pd.DataFrame(), parser_stats
+    
+    # --- CORRECTED URL FILTERING ---
+    if not parser_result['urls'].empty:
+        original_url_count = len(parser_result['urls'])
+        
+        # 1. Filter for specific domains
+        allowed_domains = ['en.wikipedia.org', 'archive.org', 'web.archive.org', 'factcheck.org']
+        
+        # 2. Exclude binary/image files
+        forbidden_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.pdf', '.mp4')
+
+        # FIX: Added .str before .endswith()
+        parser_result['urls'] = parser_result['urls'][
+            parser_result['urls']['url'].str.contains('|'.join(allowed_domains), case=False, na=False) &
+            ~parser_result['urls']['url'].str.lower().str.endswith(forbidden_extensions)
+        ].copy()
+
+        logger.info(f"🎯 URL Filter: Reduced {original_url_count} URLs to {len(parser_result['urls'])} high-quality sources.")
+    # --- END OF FILTERING ---
 
     # 3. HTML Fetching
     fetcher = HTMLFetcher(config_path='config.yaml')
@@ -64,7 +83,18 @@ def process_entity(qid: str, models: tuple) -> tuple:
                 text_content = processor.html_to_text(row["html"])
                 sentences = processor.text_to_sentences(text_content)
                 for sent in sentences:
-                    sentences_data.append({"url": row["url"], "sentence": sent, "reference_id": row.get("reference_id")})
+                    # --- ADDED FILTERING HERE ---
+                    # 1. Strip whitespace
+                    clean_sent = sent.strip()
+                    # 2. Only keep sentences between 20 and 500 characters
+                    # This removes 'junk' (too short) and avoids CUDA 'out of bounds' (too long)
+                    if 20 < len(clean_sent) < 300:
+                        sentences_data.append({
+                            "url": row["url"], 
+                            "sentence": clean_sent, 
+                            "reference_id": row.get("reference_id")
+                        })
+                    # --- END OF FILTERING ---
             except Exception as e:
                 logger.error(f"Sentence error: {e}")
 
@@ -89,63 +119,71 @@ def process_entity(qid: str, models: tuple) -> tuple:
     return html_df, entailment_results, parser_stats
 
 if __name__ == "__main__":
-    # Your reservation on circa01: GPU 2
-    # Ensure indices are set to 0 in modules as discussed for Visibility masking
+    # 1. Hardware Initialization
+    # Ensure you have killed old processes: pkill -9 -u kandavel python
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3" 
     
+    # 2. Testing Configuration
     DIVERSE_WIKIDATA_INSTANCES = {
-        "Q2277": "Roman Empire", "Q76": "Barack Obama", "Q9682": "Volodymyr Zelenskyy",
-        "Q312": "Angela Merkel", "Q23": "George Washington", "Q142": "Margaret Thatcher",
-        "Q191": "Vladimir Lenin", "Q352": "Charles de Gaulle", "Q913": "Theory of Evolution",
-        "Q22686": "Donald Trump", "Q729": "Wolfgang Amadeus Mozart", "Q881": "Victor Hugo",
-        "Q90": "Paris", "Q220": "Rome", "Q30": "United States of America",
-        "Q145": "United Kingdom", "Q183": "Germany", "Q17": "Japan",
-        "Q84": "London", "Q60": "New York City", "Q148": "Beijing",
-        "Q64": "Berlin", "Q1748": "Copenhagen", "Q413": "Microsoft",
-        "Q95": "Google", "Q94": "Android", "Q5891": "Democracy",
-        "Q16": "Canada", "Q39": "Switzerland", "Q40": "Austria"
+        "Q76": "Barack Obama"
     }
 
-    # Output file configuration
+    # 3. Output Configuration
     output_file = "batch_results.csv"
+    # Optional: Remove old file to start fresh
+    if os.path.exists(output_file):
+        os.remove(output_file)
 
-    # Load models once
+    # 4. Model Loading
+    print("Initializing models (Retrieval on CPU, Entailment on GPU)...")
     models = initialize_models() 
     all_results = []
 
+    # 5. Main Processing Loop
     for qid, label in DIVERSE_WIKIDATA_INSTANCES.items():
         print(f"\n--- Processing {label} ({qid}) ---")
         try:
+            # Process the entity
             html_df, entailment_results, parser_stats = process_entity(qid, models)
             
-            if not entailment_results.empty:
-                # Add metadata
+            # 6. Result Handling & Live Saving
+            if entailment_results is not None and not entailment_results.empty:
+                print(f"📊 Attempting to save {len(entailment_results)} rows...")
+                
+                # Add metadata for analysis
                 entailment_results['batch_entity_qid'] = qid
                 entailment_results['batch_entity_label'] = label
                 
-                # --- LIVE SAVE LOGIC ---
-                # Check if file exists to determine if we need to write the header
+                # Determine if we need to write the CSV header
                 file_exists = os.path.isfile(output_file)
                 
-                # Append to CSV (mode='a')
+                # Perform the Live Save (Append mode)
                 entailment_results.to_csv(
                     output_file, 
                     mode='a', 
                     index=False, 
-                    header=not file_exists
+                    header=not file_exists,
+                    encoding='utf-8'
                 )
                 
+                # Force the OS to write to disk immediately (prevents empty file on crash)
+                if hasattr(os, 'sync'):
+                    os.sync()
+                
                 all_results.append(entailment_results)
-                print(f"DONE: Found {len(entailment_results)} verifiable claims. Saved to {output_file}")
+                print(f"✅ DONE: Found {len(entailment_results)} verifiable claims.")
+                print(f"📁 Results written and synced to: {os.path.abspath(output_file)}")
+            
             else:
-                print(f"SKIP: No verifiable evidence found for {label}.")
+                print(f"ℹ️ SKIP: No verifiable evidence found for {label}.")
                 
         except Exception as e:
-            # This catches the 'NoneType' error or network errors without stopping the whole loop
-            print(f"CRITICAL ERROR for {label}: {e}")
+            # This prevents one entity's failure from stopping the whole batch
+            print(f"❌ CRITICAL ERROR for {label}: {e}")
             logger.error(f"Stack trace for {label}:", exc_info=True)
 
-    # Final Summary
+    # 7. Final Summary
     if all_results:
-        print(f"\nBatch complete. All processed results are available in {output_file}")
+        print(f"\n🚀 Batch complete. Final results available in {output_file}")
     else:
-        print("\nBatch finished with no results found.")
+        print("\n⚠️ Batch finished, but no verifiable claims were found.")
