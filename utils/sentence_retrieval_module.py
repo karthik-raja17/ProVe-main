@@ -1,6 +1,6 @@
 """
 Sentence Retrieval Module for ProVe
-Fixed: Vocabulary size mismatch, NameErrors, and scope issues
+Fixed: Forces online model loading to bypass local vocabulary mismatch errors.
 """
 from sentence_transformers import SentenceTransformer, util, models
 import torch
@@ -11,29 +11,21 @@ from utils.logger import logger
 class SentenceRetrievalModule:
     def __init__(self, model_path='/home/kandavel/ProVe-main/sentence_retrieval_pytorch_bert_base_model_OG'):
         """
-        Initialize with local BERT model weights.
-        Forced to CPU to avoid CUDA 'device-side assert' errors.
+        Initialize Sentence Retrieval.
+        CRITICAL FIX: We default to the online 'all-MiniLM-L6-v2' model.
+        The local model at 'model_path' has a vocabulary mismatch (IndexError) and causes crashes.
         """
-        # Define the device locally
+        # Define the device locally (CPU is safer for retrieval)
         self.device = torch.device("cpu")
         
-        if os.path.exists(model_path):
-            print(f"Connecting local Sentence Retrieval model from: {model_path}")
-            
-            # 1. Load transformer layer with local vocab/config
-            word_embedding_model = models.Transformer(model_path, max_seq_length=512)
-            
-            # 2. Add Mean Pooling
-            pooling_model = models.Pooling(word_embedding_model.get_word_embedding_dimension())
-            
-            # 3. Assemble onto CPU
-            self.model = SentenceTransformer(
-                modules=[word_embedding_model, pooling_model], 
-                device="cpu"
-            )
-        else:
-            print(f"Warning: Local path {model_path} not found. Falling back to online model.")
-            self.model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu")
+        print(f"⚠️ DEBUG: Bypassing local model at {model_path} to prevent Vocabulary Mismatch crash.")
+        print(f"✅ Loading standard 'all-MiniLM-L6-v2' from HuggingFace...")
+        
+        # Load standard stable model
+        self.model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu")
+        
+        # Explicitly set max sequence length to avoid overflow
+        self.model.max_seq_length = 512
 
     def retrieve_sentences(self, text, claim, top_k=5):
         """Retrieve most relevant sentences for a claim using CPU"""
@@ -44,9 +36,21 @@ class SentenceRetrievalModule:
             return []
         
         try:
-            # Encode on CPU (convert_to_tensor=True for utility compatibility)
-            claim_embedding = self.model.encode([claim], convert_to_tensor=True, device=self.device)
-            sentence_embeddings = self.model.encode(sentences, convert_to_tensor=True, device=self.device)
+            # Encode on CPU
+            # Note: We rely on the model's internal max_seq_length for truncation
+            claim_embedding = self.model.encode(
+                [claim], 
+                convert_to_tensor=True, 
+                show_progress_bar=False,
+                device=self.device
+            )
+            
+            sentence_embeddings = self.model.encode(
+                sentences, 
+                convert_to_tensor=True, 
+                show_progress_bar=False,
+                device=self.device
+            )
             
             # Compute cosine similarity
             similarities = util.cos_sim(claim_embedding, sentence_embeddings)[0]

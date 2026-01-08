@@ -1,5 +1,7 @@
 """
-Fixed HTML to Evidence processor with correct NLTK path and List/DataFrame compatibility
+Fixed HTML to Evidence processor:
+1. Replaced unstable np.argsort with torch.topk to fix 'step must be greater than zero' error.
+2. Corrected max_seq_length to 256 (MiniLM limit).
 """
 import nltk
 import os
@@ -54,24 +56,20 @@ class HTMLSentenceProcessor:
             return ""
     
     def text_to_sentences(self, text):
-        """Split text and HARD LIMIT character count to prevent CUDA crashes"""
+        """Split text and HARD LIMIT character count to prevent overflow"""
         try:
             if not text:
                 return []
             
-            # Use 'sentences' consistently to avoid NameError
             sentences = nltk.tokenize.sent_tokenize(text)
             
             valid_sentences = []
             for s in sentences:
                 clean_s = s.strip()
-                
-                # 1. Skip tiny noise fragments
                 if len(clean_s) < 20:
                     continue
                 
-                # 2. Hard limit: 500 characters is safely ~150 tokens.
-                # This stays well below the 512-token limit of BERT models.
+                # Hard limit 500 chars (~100-150 words)
                 if len(clean_s) > 500:
                     valid_sentences.append(clean_s[:500])
                 else:
@@ -87,9 +85,7 @@ class HTMLSentenceProcessor:
         sentences_data = []
         for idx, row in html_df.iterrows():
             if row['status'] == 200 and row.get('html') is not None:
-                # Convert HTML to text
                 text_content = self.html_to_text(row["html"])
-                # Convert text to sentences
                 sentences = self.text_to_sentences(text_content)
                 for sent in sentences:
                     sentences_data.append({
@@ -110,31 +106,27 @@ class EvidenceSelector:
             self.model = SentenceTransformer(model_name)
         
         # 2. Identify the internal SentenceTransformer object
-        # Your wrapper (SentenceRetrievalModule) holds the actual model in .model
         self.actual_transformer = self.model.model if hasattr(self.model, 'model') else self.model
         
-        # 3. FORCE Truncation Limits
-        # This is the "Magic Fix" for the vectorized_gather_kernel error
-        self.actual_transformer.max_seq_length = 256 
+        # 3. SET Truncation via Attribute
+        # MiniLM usually supports 256 tokens max
+        if hasattr(self.actual_transformer, 'max_seq_length'):
+            self.actual_transformer.max_seq_length = 256
         
-        # 4. Ensure it's on the correct device (logical cuda:0)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 4. FORCE CPU for stability
+        self.device = torch.device("cpu")
         self.actual_transformer.to(self.device)
         
-        logger.info(f"Retriever initialized on {self.device} with max_seq_length: {self.actual_transformer.max_seq_length}")
+        logger.info(f"Retriever initialized on {self.device} with max_seq_length: {getattr(self.actual_transformer, 'max_seq_length', 'Default')}")
         self.verb_module = verb_module
     
     def select_relevant_sentences(self, verbalized_claims, sentences_df, top_k=5):
-        """
-        Select most relevant sentences for each verbalized claim.
-        Handles DataFrames, Lists, and even single Strings.
-        """
+        """Select most relevant sentences for each verbalized claim using torch.topk"""
         if sentences_df is None or sentences_df.empty:
             return pd.DataFrame()
 
         # 1. Normalize input to a list of dictionaries
         claims_to_process = []
-        
         if isinstance(verbalized_claims, str):
             claims_to_process = [{'verbalized_claim': verbalized_claims}]
         elif isinstance(verbalized_claims, list):
@@ -156,13 +148,13 @@ class EvidenceSelector:
         if not sentences:
             return pd.DataFrame()
         
-        # 2. Encode all pool sentences once for efficiency
+        # 2. Encode all pool sentences
         try:
-            # REMOVE truncation=True from here
             sentence_embeddings = self.model.model.encode(
                 sentences, 
                 convert_to_tensor=True, 
-                show_progress_bar=False
+                show_progress_bar=False,
+                device=self.device
             )
         except Exception as e:
             logger.error(f"Error encoding sentence pool: {e}")
@@ -175,25 +167,29 @@ class EvidenceSelector:
                 continue
             
             try:
-                # REMOVE truncation=True from here as well
                 claim_embedding = self.model.model.encode(
                     [claim_text], 
                     convert_to_tensor=True,
-                    show_progress_bar=False
+                    show_progress_bar=False,
+                    device=self.device
                 )
                 
                 # Compute similarity
-                
                 similarities = util.cos_sim(claim_embedding, sentence_embeddings)[0]
                 
-                # Get top-k indices
-                top_indices = np.argsort(similarities.cpu())[-top_k:][::-1]
+                # FIX: Use torch.topk instead of np.argsort slicing
+                # This prevents "step must be greater than zero" error
+                k = min(top_k, len(sentences))
+                if k == 0: continue
+                
+                # Get scores and indices directly from PyTorch
+                scores, indices = torch.topk(similarities, k=k)
                 
                 # Create evidence entries
-                for i in top_indices:
-                    similarity_score = float(similarities[i])
+                for score, idx in zip(scores, indices):
+                    i = idx.item() # Convert tensor index to int
+                    similarity_score = score.item()
                     
-                    # Base entry
                     entry = {
                         'verbalized_claim': claim_text,
                         'sentence': sentences[i],
@@ -202,7 +198,7 @@ class EvidenceSelector:
                         'reference_id': sentences_df.iloc[i].get('reference_id', '')
                     }
                     
-                    # Map metadata from claim_dict if it exists
+                    # Map metadata
                     metadata_keys = [
                         'claim_id', 'entity_id', 'property_id', 'object_id', 
                         'entity_label', 'property_label', 'object_label'
@@ -225,17 +221,18 @@ class EvidenceSelector:
             return []
         
         try:
-            # Encode claim and sentences
-            claim_embedding = self.model.encode([claim], convert_to_tensor=True)
-            sentence_embeddings = self.model.encode(sentences, convert_to_tensor=True)
+            claim_embedding = self.model.encode([claim], convert_to_tensor=True, device=self.device)
+            sentence_embeddings = self.model.encode(sentences, convert_to_tensor=True, device=self.device)
             
-            # Compute similarity
-            from sentence_transformers import util
             similarities = util.cos_sim(claim_embedding, sentence_embeddings)[0]
             
-            # Get top-k sentences
-            top_indices = np.argsort(similarities.cpu())[-top_k:][::-1]
-            evidence = [(sentences[i], float(similarities[i])) for i in top_indices]
+            # Use torch.topk here as well
+            k = min(top_k, len(sentences))
+            scores, indices = torch.topk(similarities, k=k)
+            
+            evidence = []
+            for score, idx in zip(scores, indices):
+                evidence.append((sentences[idx.item()], score.item()))
             
             return evidence
         except Exception as e:
@@ -244,7 +241,6 @@ class EvidenceSelector:
 
 # Backward compatibility function
 def process_evidence(sentences_df, parser_result):
-    """Legacy function for backward compatibility"""
     selector = EvidenceSelector()
     verbalized_claims = parser_result['claims'].copy()
     verbalized_claims['verbalized_claim'] = verbalized_claims.apply(
