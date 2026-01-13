@@ -11,45 +11,51 @@ from utils.sentence_retrieval_module import SentenceRetrievalModule
 from utils.verbalisation_module import VerbModule
 
 logger = logging.getLogger("prove")
+
+# --- CONFIG ---
 LIMIT_CLAIMS = 15
 LIMIT_URLS = 15
 
 def initialize_models():
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     print("⏳ Loading Models...")
+    # Initialize your custom module
     return TextualEntailmentModule(), SentenceRetrievalModule(), VerbModule()
 
 def save_results_categorized(all_results_df: pd.DataFrame, output_file: str):
     if all_results_df.empty: return
 
     group_key = 'claim_id'
-    
     categorized_data = {"SUPPORTS": [], "REFUTES": [], "NOT_ENOUGH_INFO": []}
+    
+    # Ensure grouping keys are strings
+    all_results_df['qid'] = all_results_df['qid'].astype(str)
+    all_results_df['claim_id'] = all_results_df['claim_id'].astype(str)
+    
     grouped = all_results_df.groupby(['qid', group_key])
 
     for (qid, _), claim_group in grouped:
         verdict = claim_group['result'].iloc[0]
         if verdict not in categorized_data: verdict = "NOT_ENOUGH_INFO"
 
-        claim_row = claim_group.iloc[0]
-        claim_object = {
+        row = claim_group.iloc[0]
+        claim_obj = {
             "qid": str(qid),
-            "entity_label": str(claim_row.get('entity_label', 'Unknown')),
-            "claim_id": str(claim_row.get('claim_id', '')),
-            "triple": str(claim_row.get('triple', '')),
-            "verbalized_claim": str(claim_row.get('verbalized_claim', '')),
+            "entity_label": str(row.get('entity_label', 'Unknown')),
+            "claim_id": str(row.get('claim_id', '')),
+            "triple": str(row.get('triple', '')),
+            "verbalized_claim": str(row.get('verbalized_claim', '')),
             "evidence": []
         }
 
-        for _, row in claim_group.iterrows():
-            claim_object['evidence'].append({
-                "url": row.get('url', ''),
-                "sentence": row.get('result_sentence', ''),
-                "retrieval_score": float(row.get('similarity_score', 0.0)),
-                "entailment_probs": row.get('label_probabilities', {})
+        for _, r in claim_group.iterrows():
+            claim_obj['evidence'].append({
+                "url": r.get('url', ''),
+                "sentence": r.get('result_sentence', ''),
+                "retrieval_score": float(r.get('similarity_score', 0.0)),
+                "entailment_probs": r.get('label_probabilities', {})
             })
-
-        categorized_data[verdict].append(claim_object)
+        categorized_data[verdict].append(claim_obj)
 
     final_output = {"metadata": {"total": len(grouped)}, "results": categorized_data}
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -62,6 +68,7 @@ def process_entity(qid: str, models: tuple) -> tuple:
     # 1. Parse
     parser = WikidataParser()
     parser_result = parser.process_entity(qid)
+    
     if parser_result['claims'].empty or parser_result['urls'].empty:
         return pd.DataFrame(), pd.DataFrame(), {}
 
@@ -70,23 +77,44 @@ def process_entity(qid: str, models: tuple) -> tuple:
     if len(parser_result['urls']) > LIMIT_URLS:
         parser_result['urls'] = parser_result['urls'].head(LIMIT_URLS)
         
-    # 2. Verbalize
-    triples = parser_result['claims']['triple'].tolist()
-    logger.info(f"Verbalizing {len(triples)} claims...")
+    # 2. Verbalize (Using the 'verbalise' dict method)
+    logger.info(f"Verbalizing {len(parser_result['claims'])} claims...")
+    
+    # Construct clean input for your module
+    triples_input = []
+    for _, row in parser_result['claims'].iterrows():
+        triples_input.append({
+            "subject": str(row.get('entity_label', '')),
+            "predicate": str(row.get('property_label', '')),
+            "object": str(row.get('object_label', ''))
+        })
+    
     try:
-        parser_result['claims']['verbalized_claim'] = verb_module.verbalise_claims(triples)
-    except:
-        parser_result['claims']['verbalized_claim'] = verb_module.verbalise_claims(parser_result['claims'])
+        # Call the robust method in your module
+        generated = verb_module.verbalise(triples_input)
+        
+        # Handle single string return vs list return
+        if isinstance(generated, str): generated = [generated]
+        
+        # Validate output
+        if len(generated) != len(triples_input):
+            logger.warning("Verbalizer count mismatch. Fallback to triples.")
+            parser_result['claims']['verbalized_claim'] = parser_result['claims']['triple']
+        else:
+            parser_result['claims']['verbalized_claim'] = generated
+            
+    except Exception as e:
+        logger.error(f"Verbalizer crashed: {e}. Fallback to triples.")
+        parser_result['claims']['verbalized_claim'] = parser_result['claims']['triple']
 
-    # 3. Filter URLs
+    # 3. Fetch HTML
     forbidden = ('.jpg', '.png', '.pdf', '.xml')
     parser_result['urls'] = parser_result['urls'][~parser_result['urls']['url'].str.lower().str.endswith(forbidden)].copy()
 
-    # 4. Fetch
     fetcher = HTMLFetcher()
     html_df = fetcher.fetch_all_html(parser_result['urls'], parser_result)
     
-    # 5. Sentences
+    # 4. Sentences
     processor = HTMLSentenceProcessor()
     sentences_data = []
     for _, row in html_df.iterrows():
@@ -98,26 +126,27 @@ def process_entity(qid: str, models: tuple) -> tuple:
 
     if not sentences_data: return html_df, pd.DataFrame(), {}
     
-    # 6. Select Evidence
+    # 5. Evidence Selection
     evidence_df = EvidenceSelector(sentence_retrieval=sentence_retrieval).select_relevant_sentences(parser_result['claims'], pd.DataFrame(sentences_data))
     
-    # --- CRITICAL FIX: Merge Metadata Back ---
+    # 6. Merge Metadata (Persist labels & verbalization)
     if not evidence_df.empty:
-        # Create metadata dataframe
-        claims_meta = parser_result['claims'][['claim_id', 'qid', 'entity_label', 'triple', 'verbalized_claim']].copy()
+        meta_cols = ['claim_id', 'qid', 'entity_label', 'triple', 'verbalized_claim']
+        claims_meta = parser_result['claims'][meta_cols].copy()
         
-        # Force string types to ensure matching works
-        evidence_df['claim_id'] = evidence_df['claim_id'].astype(str)
+        # Type enforcement
         claims_meta['claim_id'] = claims_meta['claim_id'].astype(str)
+        evidence_df['claim_id'] = evidence_df['claim_id'].astype(str)
+        
+        # Drop collisions
+        drop_cols = [c for c in meta_cols if c in evidence_df.columns and c != 'claim_id']
+        evidence_df = evidence_df.drop(columns=drop_cols)
         
         # Merge
         evidence_df = evidence_df.merge(claims_meta, on='claim_id', how='left')
         
-        # DEBUG: Verify columns
-        if 'verbalized_claim' not in evidence_df.columns:
-            logger.error(f"❌ MERGE FAILED. Columns: {evidence_df.columns}")
-        else:
-            logger.info("✅ Metadata merged successfully.")
+        # Fill NaNs
+        evidence_df['verbalized_claim'] = evidence_df['verbalized_claim'].fillna(evidence_df['triple'])
 
     # 7. Entailment
     entailment_results = ClaimEntailmentChecker(text_entailment=text_entailment).process_entailment(evidence_df, html_df, qid)

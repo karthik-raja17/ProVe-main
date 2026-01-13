@@ -29,60 +29,44 @@ class ClaimEntailmentChecker:
             'claim_TE_label_weighted_sum': [], 'processed_timestamp': []
         }
 
-        # --- DEBUG: Print Columns if crash happens ---
-        try:
-            for idx, row in tqdm(textual_entailment_df.iterrows(), total=textual_entailment_df.shape[0], desc="Checking Entailment"):
-                
-                # Robust Claim Text Extraction
-                claim = ""
-                if 'verbalized_claim' in row and pd.notna(row['verbalized_claim']):
-                    claim = row['verbalized_claim']
-                elif 'triple' in row and pd.notna(row['triple']):
-                    claim = row['triple']
-                elif 'claim' in row and pd.notna(row['claim']):
-                    claim = row['claim']
-                else:
-                    # Log error but don't crash loop
-                    self.logger.warning(f"Skipping row {idx}: No claim text found. Cols: {row.index}")
-                    # Fill dummy data to keep lists aligned
-                    te_columns['evidence_TE_prob'].append({})
-                    te_columns['evidence_TE_prob_weighted'].append({})
-                    te_columns['evidence_TE_labels'].append("NOT_ENOUGH_INFO")
-                    te_columns['claim_TE_prob_weighted_sum'].append({})
-                    te_columns['claim_TE_label_weighted_sum'].append("NOT_ENOUGH_INFO")
-                    te_columns['processed_timestamp'].append(datetime.now().isoformat())
-                    continue
+        for _, row in tqdm(textual_entailment_df.iterrows(), total=textual_entailment_df.shape[0], desc="Checking Entailment"):
+            # PRIORITY: Verbalized > Triple > Raw Claim
+            claim = ""
+            if 'verbalized_claim' in row and pd.notna(row['verbalized_claim']) and str(row['verbalized_claim']).strip():
+                claim = str(row['verbalized_claim'])
+            elif 'triple' in row and pd.notna(row['triple']):
+                claim = str(row['triple'])
+            else:
+                # Last resort fallback to prevent crash
+                claim = row.get('claim', 'Unknown Claim')
 
-                evidence = [{'sentence': row['sentence'], 'score': row['similarity_score']}]
-                
-                evidence_TE_prob = self.te_module.get_batch_scores(claims=[claim], evidence=[e['sentence'] for e in evidence])
-                evidence_TE_labels = [self.te_module.get_label_from_scores(s) for s in evidence_TE_prob]
-                
-                evidence_TE_prob_weighted = []
-                for probs, ev in zip(evidence_TE_prob, evidence):
-                    if ev['score'] > SCORE_THRESHOLD:
-                        evidence_TE_prob_weighted.append({k: v * ev['score'] for k, v in probs.items()})
-                if not evidence_TE_prob_weighted:
-                    evidence_TE_prob_weighted = [{'SUPPORTS': 0.0, 'REFUTES': 0.0, 'NOT_ENOUGH_INFO': 0.0}]
-                
-                claim_TE_prob_weighted_sum = {'SUPPORTS': 0.0, 'REFUTES': 0.0, 'NOT_ENOUGH_INFO': 0.0}
-                for wp in evidence_TE_prob_weighted:
-                    for label, val in wp.items():
-                        key = label.upper()
-                        if key == 'NEI': key = 'NOT_ENOUGH_INFO'
-                        claim_TE_prob_weighted_sum[key] = claim_TE_prob_weighted_sum.get(key, 0.0) + val
-                
-                claim_TE_label_weighted_sum = self.te_module.get_label_from_scores(claim_TE_prob_weighted_sum)
-                
-                te_columns['evidence_TE_prob'].append(evidence_TE_prob)
-                te_columns['evidence_TE_prob_weighted'].append(evidence_TE_prob_weighted)
-                te_columns['evidence_TE_labels'].append(evidence_TE_labels)
-                te_columns['claim_TE_prob_weighted_sum'].append(claim_TE_prob_weighted_sum)
-                te_columns['claim_TE_label_weighted_sum'].append(claim_TE_label_weighted_sum)
-                te_columns['processed_timestamp'].append(datetime.now().isoformat())
-        except Exception as e:
-            self.logger.error(f"Entailment Crash: {e}. DataFrame Columns: {textual_entailment_df.columns}")
-            raise e
+            evidence = [{'sentence': row['sentence'], 'score': row['similarity_score']}]
+            
+            evidence_TE_prob = self.te_module.get_batch_scores(claims=[claim], evidence=[e['sentence'] for e in evidence])
+            evidence_TE_labels = [self.te_module.get_label_from_scores(s) for s in evidence_TE_prob]
+            
+            evidence_TE_prob_weighted = []
+            for probs, ev in zip(evidence_TE_prob, evidence):
+                if ev['score'] > SCORE_THRESHOLD:
+                    evidence_TE_prob_weighted.append({k: v * ev['score'] for k, v in probs.items()})
+            if not evidence_TE_prob_weighted:
+                evidence_TE_prob_weighted = [{'SUPPORTS': 0.0, 'REFUTES': 0.0, 'NOT_ENOUGH_INFO': 0.0}]
+            
+            claim_TE_prob_weighted_sum = {'SUPPORTS': 0.0, 'REFUTES': 0.0, 'NOT_ENOUGH_INFO': 0.0}
+            for wp in evidence_TE_prob_weighted:
+                for label, val in wp.items():
+                    key = label.upper()
+                    if key == 'NEI': key = 'NOT_ENOUGH_INFO'
+                    claim_TE_prob_weighted_sum[key] = claim_TE_prob_weighted_sum.get(key, 0.0) + val
+            
+            claim_TE_label_weighted_sum = self.te_module.get_label_from_scores(claim_TE_prob_weighted_sum)
+            
+            te_columns['evidence_TE_prob'].append(evidence_TE_prob)
+            te_columns['evidence_TE_prob_weighted'].append(evidence_TE_prob_weighted)
+            te_columns['evidence_TE_labels'].append(evidence_TE_labels)
+            te_columns['claim_TE_prob_weighted_sum'].append(claim_TE_prob_weighted_sum)
+            te_columns['claim_TE_label_weighted_sum'].append(claim_TE_label_weighted_sum)
+            te_columns['processed_timestamp'].append(datetime.now().isoformat())
 
         for col, values in te_columns.items(): textual_entailment_df[col] = values
         return textual_entailment_df
@@ -92,17 +76,13 @@ class ClaimEntailmentChecker:
         all_result = pd.DataFrame()
         
         for idx, row in results.iterrows():
-            # Handle potentially empty result due to skip above
             if not row['evidence_TE_prob']: continue
 
-            probs = row['evidence_TE_prob'][0]
-            max_score = max(probs.values()) if isinstance(probs, dict) and probs else 0.0
-            
             aBox = pd.DataFrame({
                 'qid': [row.get('qid', '')],
                 'claim_id': [row.get('claim_id', '')],
                 'verbalized_claim': [row.get('verbalized_claim', '')],
-                'triple': [row.get('triple', '')],  
+                'triple': [row.get('triple', '')],
                 'entity_label': [row.get('entity_label', '')],
                 'url': [row.get('url', '')],
                 'similarity_score': [row['similarity_score']],
@@ -139,15 +119,13 @@ class ClaimEntailmentChecker:
         if 'reference_id' not in html_df.columns: html_df['reference_id'] = html_df.index
         
         evidence_df = evidence_df.merge(html_df[['reference_id', 'url']], on='reference_id', how='left')
-        
         entailment_results = self.check_entailment(evidence_df)
+        
         if entailment_results.empty: return pd.DataFrame()
-
+        
         probabilities = entailment_results['evidence_TE_prob'].copy()
         
         aggregated_results = self.format_results(entailment_results)
-        if aggregated_results.empty: return pd.DataFrame()
-
         final_verdict = self.get_final_verdict(aggregated_results)
         aggregated_results = pd.concat([aggregated_results, final_verdict], axis=1)
         
@@ -157,10 +135,8 @@ class ClaimEntailmentChecker:
             'result', 'result_sentence', 'reference_id'
         ]
         
-        valid_cols = [c for c in cols_to_keep if c in aggregated_results.columns]
-        final_results = aggregated_results[valid_cols].copy()
+        final_results = aggregated_results[[c for c in cols_to_keep if c in aggregated_results.columns]].copy()
         
-        # Safe extraction of probabilities
         def extract_prob(x):
             if not x or not isinstance(x, list) or not x[0]: 
                 return {'SUPPORTS': 0.0, 'REFUTES': 0.0, 'NOT ENOUGH INFO': 0.0}
