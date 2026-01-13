@@ -1,27 +1,18 @@
-"""
-Claim Entailment Checker for ProVe
-Fixed: Dictionary arithmetic for weighted probabilities and aggregation logic.
-"""
 import pandas as pd
-import numpy as np
-from typing import Dict, List, Tuple
-import logging
 import yaml
-from utils.textual_entailment_module import TextualEntailmentModule
 from tqdm import tqdm
 from datetime import datetime
-
 from utils.logger import logger
+from utils.textual_entailment_module import TextualEntailmentModule
 
 class ClaimEntailmentChecker:
     def __init__(self, config_path: str = 'config.yaml', text_entailment=None):
         self.logger = logger
         self.config = self.load_config(config_path)
-        # Use provided model or create new one
         self.te_module = text_entailment or TextualEntailmentModule()
         
     @staticmethod
-    def load_config(config_path: str) -> Dict:
+    def load_config(config_path: str) -> dict:
         try:
             with open(config_path, 'r') as file:
                 return yaml.safe_load(file)
@@ -29,10 +20,6 @@ class ClaimEntailmentChecker:
             return {'evidence_selection': {'score_threshold': 0.0}}
 
     def check_entailment(self, evidence_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Perform textual entailment checking on evidence sentences
-        """
-        # Safely get threshold
         try:
             SCORE_THRESHOLD = self.config['evidence_selection']['score_threshold']
         except:
@@ -40,218 +27,112 @@ class ClaimEntailmentChecker:
 
         textual_entailment_df = evidence_df.copy()
         
-        # Initialize columns for results
         te_columns = {
-            'evidence_TE_prob': [],
-            'evidence_TE_prob_weighted': [],
-            'evidence_TE_labels': [],
-            'claim_TE_prob_weighted_sum': [],
-            'claim_TE_label_weighted_sum': [],
-            'claim_TE_label_malon': [],
-            'processed_timestamp': []
+            'evidence_TE_prob': [], 'evidence_TE_prob_weighted': [],
+            'evidence_TE_labels': [], 'claim_TE_prob_weighted_sum': [],
+            'claim_TE_label_weighted_sum': [], 'processed_timestamp': []
         }
 
-        for _, row in tqdm(textual_entailment_df.iterrows(), total=textual_entailment_df.shape[0]):
-            
-            # FIXED: Use 'verbalized_claim' instead of 'claim'
+        for _, row in tqdm(textual_entailment_df.iterrows(), total=textual_entailment_df.shape[0], desc="Checking Entailment"):
             claim_column = 'verbalized_claim' if 'verbalized_claim' in row else 'claim'
             claim = row[claim_column]
+            evidence = [{'sentence': row['sentence'], 'score': row['similarity_score']}]
             
-            evidence = [{
-                'sentence': row['sentence'],
-                'score': row['similarity_score']
-            }]
-            evidence_size = len(evidence)
-            
-            # Get textual entailment probabilities (List of Dicts)
-            evidence_TE_prob = self.te_module.get_batch_scores(
-                claims=[claim] * evidence_size,
-                evidence=[e['sentence'] for e in evidence]
-            )
-            
-            # Get labels from probabilities
+            evidence_TE_prob = self.te_module.get_batch_scores(claims=[claim], evidence=[e['sentence'] for e in evidence])
             evidence_TE_labels = [self.te_module.get_label_from_scores(s) for s in evidence_TE_prob]
             
-            # --- FIX 1: Dictionary Multiplication ---
-            # Old crashing code: probs * ev['score']
-            # New code: Dictionary comprehension
             evidence_TE_prob_weighted = []
             for probs, ev in zip(evidence_TE_prob, evidence):
                 if ev['score'] > SCORE_THRESHOLD:
-                    # Multiply each probability by the similarity score
-                    weighted_probs = {k: v * ev['score'] for k, v in probs.items()}
-                    evidence_TE_prob_weighted.append(weighted_probs)
+                    evidence_TE_prob_weighted.append({k: v * ev['score'] for k, v in probs.items()})
             
-            # Handle empty case with Dictionary structure
             if not evidence_TE_prob_weighted:
                 evidence_TE_prob_weighted = [{'SUPPORTS': 0.0, 'REFUTES': 0.0, 'NOT_ENOUGH_INFO': 0.0}]
             
-            # --- FIX 2: Weighted Summation ---
-            # Old crashing code: np.sum(evidence_TE_prob_weighted, axis=0)
-            # New code: Key-wise summation
             claim_TE_prob_weighted_sum = {'SUPPORTS': 0.0, 'REFUTES': 0.0, 'NOT_ENOUGH_INFO': 0.0}
             for wp in evidence_TE_prob_weighted:
                 for label, val in wp.items():
-                    # Normalize keys to upper case just in case
                     key = label.upper()
                     if key == 'NEI': key = 'NOT_ENOUGH_INFO'
                     claim_TE_prob_weighted_sum[key] = claim_TE_prob_weighted_sum.get(key, 0.0) + val
             
-            # Get final labels
             claim_TE_label_weighted_sum = self.te_module.get_label_from_scores(claim_TE_prob_weighted_sum)
             
-            # --- FIX 3: Malon Label Fallback ---
-            # Check if method exists to prevent AttributeError
-            if hasattr(self.te_module, 'get_label_malon'):
-                claim_TE_label_malon = self.te_module.get_label_malon(evidence_TE_prob)
-            else:
-                # Fallback to the weighted sum label
-                claim_TE_label_malon = claim_TE_label_weighted_sum
-            
-            # Store results
             te_columns['evidence_TE_prob'].append(evidence_TE_prob)
             te_columns['evidence_TE_prob_weighted'].append(evidence_TE_prob_weighted)
             te_columns['evidence_TE_labels'].append(evidence_TE_labels)
-            te_columns['claim_TE_prob_weighted_sum'].append(claim_TE_prob_weighted_sum) # Append dict directly
+            te_columns['claim_TE_prob_weighted_sum'].append(claim_TE_prob_weighted_sum)
             te_columns['claim_TE_label_weighted_sum'].append(claim_TE_label_weighted_sum)
-            te_columns['claim_TE_label_malon'].append(claim_TE_label_malon)
             te_columns['processed_timestamp'].append(datetime.now().isoformat())
 
-        # Add results to DataFrame
         for col, values in te_columns.items():
             textual_entailment_df[col] = values
-
         return textual_entailment_df
 
     def format_results(self, evidence_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Format results into a readable table with all required columns
-        """
         results = evidence_df.copy()
-        
         all_result = pd.DataFrame()
+        
         for idx, row in results.iterrows():
-            
-            # Helper to get max score from dict safely
             probs = row['evidence_TE_prob'][0]
-            max_score = max(probs.values()) if isinstance(probs, dict) else 0.0
-
-            aResult = pd.DataFrame({
-                'sentence': [row['sentence']],
-                'Relevance_score': [row['similarity_score']],
-                'TextEntailment': [row['evidence_TE_labels'][0]],
-                'Entailment_score': [max_score] # Fixed access
-            })
-
+            max_score = max(probs.values()) if isinstance(probs, dict) and probs else 0.0
+            
             aBox = pd.DataFrame({
                 'qid': [row.get('qid', '')],
-                'property_id': [row.get('property_id', '')],
-                'object_id': [row.get('object_id', '')],
+                'claim_id': [row.get('claim_id', '')],
+                'verbalized_claim': [row.get('verbalized_claim', '')],
                 'entity_label': [row.get('entity_label', '')],
-                'property_label': [row.get('property_label', '')],
-                'object_label': [row.get('object_label', '')],
-                'reference_id': [row.get('reference_id', '')],
                 'url': [row.get('url', '')],
-                'text_entailment_score': [max_score], # Fixed access
                 'similarity_score': [row['similarity_score']],
+                'reference_id': [row.get('reference_id', '')],
                 'processed_timestamp': [row.get('processed_timestamp')],
-                'Results': [aResult]
+                'Results': [pd.DataFrame({
+                    'sentence': [row['sentence']],
+                    'TextEntailment': [row['evidence_TE_labels'][0]],
+                })]
             })
-            
             all_result = pd.concat([all_result, aBox], axis=0)
 
         return all_result.reset_index(drop=True)
 
     def get_final_verdict(self, aggregated_result: pd.DataFrame) -> pd.DataFrame:
-        """
-        Get final verdict for each claim based on TextEntailment results
-        """
         results = []
         for idx, row in aggregated_result.iterrows():
             temp = row.Results
             if 'SUPPORTS' in temp.TextEntailment.values:
-                result_sentence = temp[temp['TextEntailment']=='SUPPORTS']['sentence'].iloc[0]
-                results.append({
-                    'result': 'SUPPORTS',
-                    'result_sentence': result_sentence
-                })
+                sent = temp[temp['TextEntailment']=='SUPPORTS']['sentence'].iloc[0]
+                results.append({'result': 'SUPPORTS', 'result_sentence': sent})
             else:
                 if temp.TextEntailment.empty:
                      results.append({'result': 'NOT_ENOUGH_INFO', 'result_sentence': ''})
                 else:
-                    result = temp.TextEntailment.mode()[0]
-                    result_sentence = temp[temp['TextEntailment']==result]['sentence'].iloc[0]
-                    results.append({
-                        'result': result,
-                        'result_sentence': result_sentence
-                    })
+                    res = temp.TextEntailment.mode()[0]
+                    sent = temp[temp['TextEntailment']==res]['sentence'].iloc[0]
+                    results.append({'result': res, 'result_sentence': sent})
         return pd.DataFrame(results, index=aggregated_result.index)
 
-    def process_evidence(self, sentences_df: pd.DataFrame, parser_result: Dict) -> pd.DataFrame:
-        """
-        Process evidence sentences and add metadata from parser_result
-        """
-        # Create copy of input DataFrame
-        evidence_df = sentences_df.copy()
-        
-        # Add metadata from claims DataFrame
-        claims_df = parser_result['claims']
-        
-        # Add all required metadata fields
-        evidence_df['qid'] = claims_df['entity_id'].iloc[0]  # Using entity_id as qid
-        evidence_df['entity_label'] = claims_df['entity_label'].iloc[0]
-        evidence_df['claim_id'] = claims_df['claim_id'].iloc[0]
-        evidence_df['property_id'] = claims_df['property_id'].iloc[0]
-        evidence_df['property_label'] = claims_df['property_label'].iloc[0]
-        evidence_df['object_id'] = claims_df['object_id'].iloc[0]
-        evidence_df['object_label'] = claims_df['object_label'].iloc[0]
-        
-        # Add URL if exists in sentences_df
-        if 'url' in sentences_df.columns:
-            evidence_df['url'] = sentences_df['url']
-        
-        return evidence_df
-
     def process_entailment(self, evidence_df: pd.DataFrame, html_df: pd.DataFrame, qid: str) -> pd.DataFrame:
-        """
-        Main function to process entailment checking
-        """
-        # Return empty DataFrame if evidence_df is empty
-        if evidence_df.empty:
-            return pd.DataFrame()
+        if evidence_df.empty: return pd.DataFrame()
         
-        # Add reference_id if not exists in evidence_df
-        if 'reference_id' not in evidence_df.columns:
-            evidence_df['reference_id'] = evidence_df.index
+        if 'reference_id' not in evidence_df.columns: evidence_df['reference_id'] = evidence_df.index
+        if 'reference_id' not in html_df.columns: html_df['reference_id'] = html_df.index
         
-        # Add reference_id if not exists in html_df
-        if 'reference_id' not in html_df.columns:
-            html_df['reference_id'] = html_df.index
-        
-        evidence_df = evidence_df.merge(
-            html_df[['reference_id', 'url']], 
-            on='reference_id', 
-            how='left'
-        )
-        
-        # Check entailment and keep original probabilities
+        evidence_df = evidence_df.merge(html_df[['reference_id', 'url']], on='reference_id', how='left')
         entailment_results = self.check_entailment(evidence_df)
         probabilities = entailment_results['evidence_TE_prob'].copy()
         
-        # Format results
         aggregated_results = self.format_results(entailment_results)
-        
-        # Get final verdict
         final_verdict = self.get_final_verdict(aggregated_results)
         aggregated_results = pd.concat([aggregated_results, final_verdict], axis=1)
         
-        # Keep only necessary columns and drop 'Results'
-        final_results = aggregated_results[['text_entailment_score', 'similarity_score',
-                                          'processed_timestamp', 'result',
-                                          'result_sentence', 'reference_id']]
+        cols_to_keep = [
+            'qid', 'entity_label', 'claim_id', 'verbalized_claim', 
+            'url', 'similarity_score', 'processed_timestamp', 
+            'result', 'result_sentence', 'reference_id'
+        ]
         
-        # Add label probabilities using the saved probabilities
-        # Fixed for Dictionary access
+        final_results = aggregated_results[[c for c in cols_to_keep if c in aggregated_results.columns]].copy()
+        
         final_results['label_probabilities'] = probabilities.apply(
             lambda x: {
                 'SUPPORTS': float(x[0].get('SUPPORTS', 0.0)),
@@ -259,55 +140,4 @@ class ClaimEntailmentChecker:
                 'NOT ENOUGH INFO': float(x[0].get('NOT_ENOUGH_INFO', 0.0))
             }
         )
-        
         return final_results
-
-
-if __name__ == "__main__":
-    qid = 'Q192309'
-    
-    from wikidata_parser import WikidataParser
-    from refs_html_collection import HTMLFetcher
-    from refs_html_to_evidences import HTMLSentenceProcessor
-    from refs_html_to_evidences import EvidenceSelector
-
-    # Get URLs and claims
-    print('Processing qid:', qid)
-    parser = WikidataParser()
-    parser_result = parser.process_entity(qid)
-    
-    # Fetch HTML content
-    print('Fetching HTML')
-    fetcher = HTMLFetcher(config_path='local.yaml')
-    html_df = fetcher.fetch_all_html(parser_result['urls'], parser_result)
-    
-    # Convert HTML to sentences
-    print('Processing HTML to sentences')
-    processor = HTMLSentenceProcessor()
-    sentences_df = processor.process_html_to_sentences(html_df)
-    
-    # VERBALIZATION STEP ADDED
-    print('Verbalizing claims')
-    from utils.verbalisation_module import VerbModule
-    verb_module = VerbModule()
-    if hasattr(verb_module, 'verbalize_claims'):
-        verbalized_claims = verb_module.verbalize_claims(parser_result['claims'])
-    else:
-        # Fallback verbalization
-        verbalized_claims = parser_result['claims'].copy()
-        verbalized_claims['verbalized_claim'] = verbalized_claims.apply(
-            lambda row: f"{row['entity_label']} {row['property_label']} {row['object_label']}", 
-            axis=1
-        )
-    
-    # Process evidence selection WITH VERBALIZED CLAIMS
-    print('Processing evidence selection')
-    selector = EvidenceSelector()
-    evidence_df = selector.select_relevant_sentences(verbalized_claims, sentences_df)
-    
-    # Check entailment with metadata
-    print('Checking entailment')
-    checker = ClaimEntailmentChecker()  
-    entailment_results = checker.process_entailment(evidence_df, html_df, qid)
-    
-    print(f"Entailment results: {len(entailment_results)} rows")

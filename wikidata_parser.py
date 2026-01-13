@@ -3,14 +3,9 @@ import json
 import logging
 import os
 from typing import List, Dict, Any
-
-import nltk
 import pandas as pd
 import requests
 import yaml
-from qwikidata.linked_data_interface import get_entity_dict_from_api
-
-# Initialize logger
 from utils.logger import logger
 
 class Config:
@@ -20,139 +15,158 @@ class Config:
     @staticmethod
     def _load_config(config_path: str) -> Dict[str, Any]:
         if not os.path.exists(config_path):
-            return {'database': {'name': 'prove_database.db'}, 'parsing': {'reset_database': False}}
+            return {}
         with open(config_path, 'r') as file:
             return yaml.safe_load(file)
-    
-    @property
-    def database_name(self) -> str:
-        return self.config.get('database', {}).get('name')
-    
-    @property
-    def reset_database(self) -> bool:
-        return self.config.get('parsing', {}).get('reset_database', False)
 
 class EntityProcessor:
     def __init__(self):
-        # REQUIRED: Set a descriptive User-Agent to bypass Wikidata 403 Forbidden errors
-        self.user_agent = 'ProVe-Research-Tool/1.1 (https://github.com/karthik-raja17/ProVe; karthikraja2021@gmail.com)'
+        self.user_agent = 'ProVe-Research-Tool/1.1 (bot-contact: your-email@example.com)'
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': self.user_agent})
 
     def process_entity(self, qid: str) -> Dict[str, pd.DataFrame]:
-        """Fetch entity data using Special:EntityData endpoint which is bot-friendly"""
         url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
         
-        # Globally update headers temporarily for library compatibility
-        original_headers = requests.utils.default_headers().copy()
         try:
-            requests.utils.default_headers().update({'User-Agent': self.user_agent})
-            
             response = self.session.get(url, timeout=30)
             if response.status_code == 403:
-                logger.error(f"403 Forbidden: Wikidata blocking bot. UA used: {self.user_agent}")
+                logger.error("Wikidata 403 Forbidden")
                 return self._empty_return()
-            response.raise_for_status()
+            
             data = response.json()
             entity = data.get('entities', {}).get(qid, {})
-        except Exception as e:
-            logger.error(f"API Connection failed for {qid}: {str(e)}")
-            return self._empty_return()
-        finally:
-            # Restore original headers
-            requests.utils.default_headers().clear()
-            requests.utils.default_headers().update(original_headers)
-            
-        if not entity:
-            return self._empty_return()
+            if not entity: return self._empty_return()
 
-        claims_data = []
-        claims_refs_data = []
-        refs_data = []
+            claims_data = []
+            claims_refs_data = []
+            refs_data = []
 
-        entity_id = entity.get('id', qid)
-        entity_label = entity.get('labels', {}).get('en', {}).get('value', f"No label ({entity_id})")
+            entity_id = entity.get('id', qid)
+            entity_label = entity.get('labels', {}).get('en', {}).get('value', entity_id)
 
-        for property_id, claims in entity.get('claims', {}).items():
-            for claim in claims:
-                mainsnak = claim.get('mainsnak', {})
-                claim_id = claim.get('id')
-                
-                object_id = None
-                value_str = "no-value"
-                
-                if mainsnak.get('snaktype') == 'value':
-                    datavalue = mainsnak.get('datavalue', {})
-                    dv_type = datavalue.get('type')
-                    dv_value = datavalue.get('value')
+            for property_id, claims in entity.get('claims', {}).items():
+                for claim in claims:
+                    mainsnak = claim.get('mainsnak', {})
+                    claim_id = claim.get('id')
                     
-                    if dv_type == 'wikibase-entityid':
-                        object_id = dv_value.get('id') if isinstance(dv_value, dict) else dv_value
-                    value_str = str(datavalue)
-                else:
-                    value_str = mainsnak.get('snaktype', 'unknown')
-                
-                claims_data.append((
-                    entity_id, entity_label, claim_id, claim.get('rank'),
-                    property_id, mainsnak.get('datatype'), value_str, object_id
-                ))
+                    object_id = None
+                    value_str = "no-value"
+                    
+                    # --- CRITICAL FIX: CLEAN VALUE EXTRACTION ---
+                    if mainsnak.get('snaktype') == 'value':
+                        datavalue = mainsnak.get('datavalue', {})
+                        dv_type = datavalue.get('type')
+                        dv_value = datavalue.get('value')
+                        
+                        if dv_type == 'wikibase-entityid':
+                            # It's a Q-ID (e.g., Q123). Save it to object_id to fetch label later.
+                            object_id = dv_value.get('id')
+                            value_str = object_id 
+                        elif dv_type == 'time':
+                            # It's a Date. Extract just the timestamp string.
+                            # Input: {'time': '+1961-08-04T00:00:00Z', ...} -> Output: "1961-08-04"
+                            raw_time = dv_value.get('time', '')
+                            value_str = raw_time.replace('+', '').split('T')[0]
+                        elif dv_type == 'quantity':
+                            # It's a Number. Extract just the amount.
+                            # Input: {'amount': '+123', ...} -> Output: "123"
+                            value_str = dv_value.get('amount', '').replace('+', '')
+                        elif dv_type == 'monolingualtext':
+                            value_str = dv_value.get('text', '')
+                        else:
+                            # Fallback for strings
+                            value_str = str(dv_value)
+                    
+                    # Store Data 
+                    # Note: We temporarily set object_label = value_str. 
+                    # If it's a QID, we will overwrite this with the real name in the WikidataParser class.
+                    claims_data.append((
+                        entity_id, entity_label, claim_id, claim.get('rank'),
+                        property_id, mainsnak.get('datatype'), value_str, object_id, value_str
+                    ))
 
-                if 'references' in claim:
-                    for ref in claim['references']:
-                        ref_hash = ref.get('hash')
-                        claims_refs_data.append((claim_id, ref_hash))
-                        for ref_prop_id, snaks in ref.get('snaks', {}).items():
-                            for i, snak in enumerate(snaks):
-                                ref_val = str(snak.get('datavalue')) if snak.get('snaktype') == 'value' else snak.get('snaktype')
-                                refs_data.append((ref_hash, ref_prop_id, str(i), snak.get('datatype'), ref_val))
+                    # 3. References (Standard logic)
+                    if 'references' in claim:
+                        for ref in claim['references']:
+                            ref_hash = ref.get('hash')
+                            claims_refs_data.append((claim_id, ref_hash))
+                            for ref_prop_id, snaks in ref.get('snaks', {}).items():
+                                for i, snak in enumerate(snaks):
+                                    # Clean reference values too
+                                    if snak.get('snaktype') == 'value':
+                                        ref_dv = snak.get('datavalue', {})
+                                        if ref_dv.get('type') == 'wikibase-entityid':
+                                            ref_val = ref_dv.get('value', {}).get('id')
+                                        else:
+                                            # Simple string conversion for refs is usually fine
+                                            ref_val = str(ref_dv.get('value'))
+                                    else:
+                                        ref_val = snak.get('snaktype')
+                                    refs_data.append((ref_hash, ref_prop_id, str(i), snak.get('datatype'), ref_val))
 
-        return {
-            'claims': pd.DataFrame(claims_data, columns=['entity_id', 'entity_label', 'claim_id', 'rank', 'property_id', 'datatype', 'datavalue', 'object_id']),
-            'claims_refs': pd.DataFrame(claims_refs_data, columns=['claim_id', 'reference_id']),
-            'refs': pd.DataFrame(refs_data, columns=['reference_id', 'reference_property_id', 'reference_index', 'reference_datatype', 'reference_value'])
-        }
+            return {
+                'claims': pd.DataFrame(claims_data, columns=['entity_id', 'entity_label', 'claim_id', 'rank', 'property_id', 'datatype', 'datavalue', 'object_id', 'object_label']),
+                'claims_refs': pd.DataFrame(claims_refs_data, columns=['claim_id', 'reference_id']),
+                'refs': pd.DataFrame(refs_data, columns=['reference_id', 'reference_property_id', 'reference_index', 'reference_datatype', 'reference_value'])
+            }
+
+        except Exception as e:
+            logger.error(f"Entity Process Error: {e}")
+            return self._empty_return()
 
     def _empty_return(self):
         return {'claims': pd.DataFrame(), 'claims_refs': pd.DataFrame(), 'refs': pd.DataFrame()}
 
 class PropertyFilter:
     def __init__(self):
-        self.bad_datatypes = ['commonsMedia', 'external-id', 'globe-coordinate', 'url', 'wikibase-form', 'geo-shape', 'math', 'musical-notation', 'tabular-data', 'wikibase-sense']
+        self.bad_datatypes = ['commonsMedia', 'external-id', 'globe-coordinate', 'url', 'geo-shape', 'math']
 
     def filter_properties(self, claims_df: pd.DataFrame) -> pd.DataFrame:
-        if claims_df.empty: 
-            return claims_df
-            
-        original_size = len(claims_df)
-        
-        # Keep the rank filter (Standard requirement)
+        if claims_df.empty: return claims_df
         df = claims_df[claims_df['rank'] != 'deprecated'].copy()
-        
-        # Keep the basic datatype filter
         df = df[~df['datatype'].isin(self.bad_datatypes)]
-        
-        # --- TEMPORARY TEST: Comment out the property-id removal ---
-        # properties_to_remove = self._load_properties_to_remove()
-        # if properties_to_remove:
-        #     df = df[~df['property_id'].isin(properties_to_remove)]
-        
-        # Keep the null-value filter
-        df = df[~df['datavalue'].astype(str).isin(['somevalue', 'novalue', 'None'])]
-        
-        logger.info(f"Filtering Results: {original_size} -> {len(df)}")
         return df
-
-    def _load_properties_to_remove(self) -> List[str]:
-        try:
-            with open('properties_to_remove.json', 'r') as f:
-                data = json.load(f)
-            return [item['id'] for item in data['general']]
-        except: return []
 
 class URLProcessor:
     def __init__(self):
         self.sparql_endpoint = "https://query.wikidata.org/sparql"
-        self.headers = {'User-Agent': 'ProVe-Research-Tool/1.1 (karthikraja2021@gmail.com)'}
+        self.headers = {'User-Agent': 'ProVe-Research-Tool/1.1'}
+
+    def get_labels_batch(self, id_list: List[str]) -> Dict[str, str]:
+        """
+        Robustly fetches English labels using Wikidata's native Label Service.
+        """
+        if not id_list: return {}
+        
+        # Clean list: unique, strings only, starts with Q or P
+        unique_ids = list(set([x for x in id_list if x and isinstance(x, str) and (x.startswith('Q') or x.startswith('P'))]))
+        labels_map = {}
+        
+        chunk_size = 50
+        for i in range(0, len(unique_ids), chunk_size):
+            chunk = unique_ids[i:i+chunk_size]
+            values_str = " ".join([f"wd:{uid}" for uid in chunk])
+            
+            # Use SERVICE wikibase:label for automatic language fallback
+            query = f"""
+            SELECT ?id ?idLabel WHERE {{
+              VALUES ?id {{ {values_str} }}
+              SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,en-gb,en-ca,en-us,mul". }}
+            }}
+            """
+            try:
+                r = requests.get(self.sparql_endpoint, params={'format': 'json', 'query': query}, headers=self.headers, timeout=10)
+                if r.status_code == 200:
+                    for item in r.json()['results']['bindings']:
+                        uid = item['id']['value'].split('/')[-1]
+                        label = item.get('idLabel', {}).get('value')
+                        # Only store if valid text and not just the ID itself
+                        if label and label != uid:
+                            labels_map[uid] = label
+            except Exception: pass
+        
+        return labels_map
 
     def get_formatter_url(self, property_id: str) -> str:
         query = f"SELECT ?formatter_url WHERE {{ wd:{property_id} wdt:P1630 ?formatter_url. }}"
@@ -163,30 +177,24 @@ class URLProcessor:
 
     @staticmethod
     def _reference_value_to_url(reference_value: str) -> str:
-        """Helper function to clean up stringified JSON reference values."""
-        if reference_value in ['novalue', 'somevalue']:
-            return reference_value
+        if reference_value in ['novalue', 'somevalue']: return reference_value
         try:
             val = ast.literal_eval(reference_value)
-            if isinstance(val, dict) and 'value' in val:
-                return str(val['value'])
+            if isinstance(val, dict) and 'value' in val: return str(val['value'])
             return str(val)
-        except:
-            return str(reference_value)
+        except: return str(reference_value)
 
-    def process_urls(self, filtered_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def process_urls(self, filtered_data: Dict) -> pd.DataFrame:
         try:
             claims_df = filtered_data['claims']
             claims_refs_df = filtered_data['claims_refs']
             refs_df = filtered_data['refs']
             
-            if claims_df.empty or refs_df.empty: 
-                return pd.DataFrame()
+            if claims_df.empty or refs_df.empty: return pd.DataFrame()
 
             valid_claim_ids = claims_df['claim_id'].unique()
             valid_refs = claims_refs_df[claims_refs_df['claim_id'].isin(valid_claim_ids)]
-            if valid_refs.empty: 
-                return pd.DataFrame()
+            if valid_refs.empty: return pd.DataFrame()
 
             valid_ref_ids = valid_refs['reference_id'].unique()
             refs_subset = refs_df[refs_df['reference_id'].isin(valid_ref_ids)].copy()
@@ -203,16 +211,13 @@ class URLProcessor:
                 ext_id_df['formatter_url'] = ext_id_df['reference_property_id'].apply(self.get_formatter_url)
                 ext_id_df = ext_id_df[ext_id_df['formatter_url'] != 'no_formatter_url'].copy()
                 if not ext_id_df.empty:
-                    ext_id_df['url'] = ext_id_df.apply(
-                        lambda x: x['formatter_url'].replace('$1', x['ext_id']), axis=1
-                    )
+                    ext_id_df['url'] = ext_id_df.apply(lambda x: x['formatter_url'].replace('$1', x['ext_id']), axis=1)
             
             combined_url_data = []
             if not url_df.empty: combined_url_data.append(url_df)
             if not ext_id_df.empty: combined_url_data.append(ext_id_df)
             
-            if not combined_url_data: 
-                return pd.DataFrame()
+            if not combined_url_data: return pd.DataFrame()
             
             final_url_df = pd.concat(combined_url_data, ignore_index=True)
             final_url_df = final_url_df.drop_duplicates(subset=['reference_id', 'url'])
@@ -223,48 +228,42 @@ class URLProcessor:
             logger.error(f"Error in process_urls: {e}")
             return pd.DataFrame()
 
-    def get_labels_from_sparql(self, entity_ids: List[str]) -> Dict[str, str]:
-        if not entity_ids: return {}
-        query = f"SELECT ?id ?label WHERE {{ wd:{entity_ids[0]} rdfs:label ?label . FILTER(LANG(?label) = 'en') BIND(wd:{entity_ids[0]} AS ?id) }}"
-        try:
-            r = requests.get(self.sparql_endpoint, params={'format': 'json', 'query': query}, headers=self.headers, timeout=20)
-            return {res['id']['value'].split('/')[-1]: res['label']['value'] for res in r.json()['results']['bindings']}
-        except: return {}
-
 class WikidataParser:
-    def __init__(self, config_path: str = 'config.yaml'):
-        self.config = Config(config_path)
+    def __init__(self):
         self.entity_processor = EntityProcessor()
         self.property_filter = PropertyFilter()
         self.url_processor = URLProcessor()
         self.processing_stats = {}
 
     def process_entity(self, qid: str) -> Dict[str, pd.DataFrame]:
-        self.processing_stats = {'entity_id': qid, 'parsing_start_timestamp': pd.Timestamp.now()}
+        self.processing_stats = {'entity_id': qid}
         
-        entity_data = self.entity_processor.process_entity(qid)
-        total_claims = len(entity_data['claims'])
+        # 1. Fetch Raw Data
+        data = self.entity_processor.process_entity(qid)
+        claims = self.property_filter.filter_properties(data['claims'])
         
-        filtered_claims = self.property_filter.filter_properties(entity_data['claims'])
+        if not claims.empty:
+            # --- FIX: OVERWRITE RAW IDs WITH LABELS ---
+            
+            # Collect all IDs
+            prop_ids = claims['property_id'].unique().tolist()
+            obj_ids = claims[claims['object_id'].notna()]['object_id'].unique().tolist()
+            all_ids = prop_ids + obj_ids
+            
+            # Fetch Labels from SPARQL
+            label_map = self.url_processor.get_labels_batch(all_ids)
+            
+            # 1. Fix Property Labels (P106 -> "occupation")
+            claims['property_label'] = claims['property_id'].apply(lambda x: label_map.get(x, x))
+            
+            # 2. Fix Object Labels (Q123 -> "screenwriter")
+            # Logic: If it has an object_id (meaning it's a Q-item), look up the label.
+            # If not (meaning it's a date or number), keep the cleaned value string.
+            claims['object_label'] = claims.apply(
+                lambda row: label_map.get(row['object_id'], row['object_label']) if row['object_id'] else row['object_label'],
+                axis=1
+            )
+            
+        urls = self.url_processor.process_urls(data)
         
-        if not filtered_claims.empty and filtered_claims['entity_label'].iloc[0].startswith('No label'):
-            label_map = self.url_processor.get_labels_from_sparql([filtered_claims['entity_id'].iloc[0]])
-            if qid in label_map: filtered_claims['entity_label'] = label_map[qid]
-
-        result = {'claims': filtered_claims, 'claims_refs': entity_data['claims_refs'], 'refs': entity_data['refs']}
-        
-        url_data = self.url_processor.process_urls(result)
-        result['urls'] = url_data
-        
-        self.processing_stats['total_claims'] = total_claims
-        self.processing_stats['url_references'] = len(url_data)
-        
-        return result
-
-    def get_processing_stats(self) -> Dict:
-        return self.processing_stats
-
-if __name__ == "__main__":
-    parser = WikidataParser()
-    res = parser.process_entity('Q76')
-    print(f"Processed entity. Found {len(res['urls'])} reference URLs.")
+        return {'claims': claims, 'urls': urls}

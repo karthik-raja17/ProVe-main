@@ -1,12 +1,11 @@
 """
 Textual Entailment Module for ProVe
 Fixed: 
-1. Added get_label_from_scores helper (Fixes AttributeError).
-2. Retained batch processing and correct argument names.
+1. Added mapping for 'LABEL_X' outputs to 'SUPPORTS/REFUTES/NEI'.
+2. Fixed get_batch_scores to return clean dictionary keys.
 """
 import torch
-from transformers import BertTokenizer, BertForSequenceClassification, pipeline
-import numpy as np
+from transformers import pipeline
 
 class TextualEntailmentModule():
     def __init__(
@@ -28,50 +27,62 @@ class TextualEntailmentModule():
             top_k=None 
         )
 
+        # MAPPING: Adjust these if your specific model uses a different order.
+        # Common FEVER/VitaminC convention: 0=SUPPORTS, 1=REFUTES, 2=NEI
+        self.id2label = {
+            'LABEL_0': 'SUPPORTS',
+            'LABEL_1': 'REFUTES',
+            'LABEL_2': 'NOT_ENOUGH_INFO' 
+        }
+
     def get_batch_scores(self, claims: list, evidence: list):
         """
         Calculates entailment scores for a batch of evidence/claim pairs.
-        Args:
-            claims (list): The list of Verbalized Claims (Hypotheses)
-            evidence (list): The list of Evidence strings (Premises)
+        Returns: List of dicts like {'SUPPORTS': 0.95, 'REFUTES': 0.05, ...}
         """
-        # 1. Map arguments to NLI concepts
-        premises = evidence
-        hypotheses = claims
-        
-        # 2. Format for BERT: "[CLS] claim [SEP] evidence"
-        formatted_inputs = [f"{h} [SEP] {p}" for p, h in zip(premises, hypotheses)]
+        # 1. Format for BERT: "[CLS] claim [SEP] evidence"
+        formatted_inputs = [f"{h} [SEP] {p}" for p, h in zip(evidence, claims)]
         
         try:
-            # 3. Run Batch Inference
+            # 2. Run Batch Inference
             results = self.entailment_pipeline(formatted_inputs, batch_size=16)
             
-            # 4. Format Output
+            # 3. Format Output
             batch_output = []
             for res in results:
-                # Convert list of dicts to single dict {'SUPPORTS': 0.9, ...}
-                prob_map = {item['label'].upper(): item['score'] for item in res}
+                # Map 'LABEL_X' to readable strings
+                prob_map = {}
+                for item in res:
+                    label_raw = item['label']
+                    score = item['score']
+                    
+                    # Convert LABEL_0 -> SUPPORTS
+                    clean_label = self.id2label.get(label_raw, label_raw).upper()
+                    
+                    # Normalize 'NEI' variations to 'NOT_ENOUGH_INFO'
+                    if clean_label == 'NEI': 
+                        clean_label = 'NOT_ENOUGH_INFO'
+                        
+                    prob_map[clean_label] = score
+                
                 batch_output.append(prob_map)
                 
             return batch_output
             
         except Exception as e:
             print(f"Error in batch entailment: {e}")
+            # Return neutral distribution on error
             return [{'SUPPORTS': 0.33, 'REFUTES': 0.33, 'NOT_ENOUGH_INFO': 0.33}] * len(claims)
 
     def get_label_from_scores(self, scores: dict):
         """
         Helper method to return the label with the highest score.
-        Input: {'SUPPORTS': 0.9, 'REFUTES': 0.05, 'NEI': 0.05}
-        Output: 'SUPPORTS'
         """
         if not scores:
             return "NOT_ENOUGH_INFO"
-        # Return the key corresponding to the max value
         return max(scores, key=scores.get)
 
     def check_entailment(self, premise, hypothesis):
         """Legacy method for backward compatibility"""
-        # Map single call to batch function
         results = self.get_batch_scores(evidence=[premise], claims=[hypothesis])
         return results[0]
