@@ -12,8 +12,8 @@ class TextualEntailmentModule():
     def __init__(
         self,
         # Ensure these paths point to your local model folder
-        model_path='/home/kandavel/ProVe-main/textual_entailment_BERT_FEVER_v4_PBT_OG/BERT_FEVER_v4_model_PBT/',
-        tokenizer_path='/home/kandavel/ProVe-main/textual_entailment_BERT_FEVER_v4_PBT_OG/BERT_FEVER_v4_model_PBT/'
+        model_path='./textual_entailment_BERT_FEVER_v4_PBT_OG/BERT_FEVER_v4_model_PBT/',
+        tokenizer_path='./textual_entailment_BERT_FEVER_v4_PBT_OG/BERT_FEVER_v4_model_PBT/'
     ):
         self.device_id = 0 if torch.cuda.is_available() else -1
         

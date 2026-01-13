@@ -2,7 +2,7 @@ database:
   name: 'wikidata_claims_refs_parsed.db'
   result_db_for_API: './reference_checked.db'
   mongodb_port: 27018
-  sqlite_path: "/home/kandavel/ProVe-main/prove_database.db"
+  sqlite_path: "./prove_database.db"
 
 queue:
   heuristic: 'random'

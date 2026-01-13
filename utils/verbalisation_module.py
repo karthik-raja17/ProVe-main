@@ -17,7 +17,7 @@ except:
 
 # Aligned with your Physical GPU 2 reservation
 DEVICE = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-CHECKPOINT = '/home/kandavel/ProVe-main/verbalisation_model.ckpt_OG/val_avg_bleu=68.1000-step_count=5.ckpt'
+CHECKPOINT = './verbalisation_model.ckpt_OG/val_avg_bleu=68.1000-step_count=5.ckpt'
 MAX_LENGTH = 384
 SEED = 42
 

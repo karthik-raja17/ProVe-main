@@ -9,7 +9,7 @@ import os
 from utils.logger import logger
 
 class SentenceRetrievalModule:
-    def __init__(self, model_path='/home/kandavel/ProVe-main/sentence_retrieval_pytorch_bert_base_model_OG'):
+    def __init__(self, model_path='./sentence_retrieval_pytorch_bert_base_model_OG'):
         """
         Initialize Sentence Retrieval.
         CRITICAL FIX: We default to the online 'all-MiniLM-L6-v2' model.
