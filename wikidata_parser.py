@@ -11,38 +11,63 @@ from utils.logger import logger
 class Config:
     def __init__(self, config_path: str = 'config.yaml'):
         self.config = self._load_config(config_path)
-    
     @staticmethod
     def _load_config(config_path: str) -> Dict[str, Any]:
-        if not os.path.exists(config_path):
-            return {}
-        with open(config_path, 'r') as file:
-            return yaml.safe_load(file)
+        if not os.path.exists(config_path): return {}
+        with open(config_path, 'r') as file: return yaml.safe_load(file)
+
+class LabelCache:
+    """Robust JSON File Cache with Absolute Path"""
+    def __init__(self, cache_file='labels_cache.json'):
+        # Ensure we look in the current working directory or absolute path
+        self.cache_file = os.path.abspath(cache_file)
+        self.cache = self._load_cache()
+        
+    def _load_cache(self):
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    logger.info(f"📂 Loaded {len(data)} labels from cache: {self.cache_file}")
+                    return data
+            except Exception as e:
+                logger.warning(f"Failed to load cache: {e}")
+                return {}
+        return {}
+    
+    def save(self):
+        try:
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to save cache: {e}")
+
+    def get(self, key):
+        return self.cache.get(str(key))
+        
+    def update(self, new_data):
+        if new_data:
+            self.cache.update(new_data)
+            self.save()
 
 class EntityProcessor:
     def __init__(self):
-        self.user_agent = 'ProVe-Tool/2.0 (research-project; contact: your-email@example.com)'
+        self.user_agent = 'ProVe-Tool/2.0'
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': self.user_agent})
 
     def process_entity(self, qid: str) -> Dict[str, pd.DataFrame]:
-        # Fetch the Entity JSON directly
         url = f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
-        
         try:
             response = self.session.get(url, timeout=30)
-            if response.status_code != 200:
-                logger.error(f"Wikidata API Error: {response.status_code}")
-                return self._empty_return()
+            if response.status_code != 200: return self._empty_return()
             
             data = response.json()
             entity = data.get('entities', {}).get(qid, {})
             if not entity: return self._empty_return()
 
-            claims_data = []
-            claims_refs_data = []
-            refs_data = []
-
+            claims_data, claims_refs_data, refs_data = [], [], []
+            # Use 'qid' as entity_id for consistency
             entity_id = entity.get('id', qid)
             entity_label = entity.get('labels', {}).get('en', {}).get('value', entity_id)
 
@@ -50,63 +75,47 @@ class EntityProcessor:
                 for claim in claims:
                     mainsnak = claim.get('mainsnak', {})
                     claim_id = claim.get('id')
+                    object_id, value_str = None, "no-value"
                     
-                    object_id = None
-                    value_str = "no-value"
-                    
-                    # 1. CLEAN VALUE EXTRACTION
                     if mainsnak.get('snaktype') == 'value':
                         datavalue = mainsnak.get('datavalue', {})
                         dv_type = datavalue.get('type')
                         dv_value = datavalue.get('value')
                         
                         if dv_type == 'wikibase-entityid':
-                            # Store Q-ID (e.g., Q223591) to fetch label later
                             object_id = dv_value.get('id')
                             value_str = object_id 
                         elif dv_type == 'time':
-                            # Extract Date: "+1961-08-04T..." -> "1961-08-04"
                             value_str = dv_value.get('time', '').replace('+', '').split('T')[0]
                         elif dv_type == 'quantity':
-                            # Extract Number: "+123" -> "123"
                             value_str = dv_value.get('amount', '').replace('+', '')
                         elif dv_type == 'monolingualtext':
                             value_str = dv_value.get('text', '')
                         else:
                             value_str = str(dv_value)
                     
-                    # 2. Add Row (object_label defaults to value_str for now)
+                    # NOTE: Renaming column 'entity_id' -> 'qid' in dataframe construction below
                     claims_data.append((
                         entity_id, entity_label, claim_id, claim.get('rank'),
                         property_id, mainsnak.get('datatype'), value_str, object_id, value_str
                     ))
 
-                    # 3. Process References
                     if 'references' in claim:
                         for ref in claim['references']:
                             ref_hash = ref.get('hash')
                             claims_refs_data.append((claim_id, ref_hash))
                             for ref_prop_id, snaks in ref.get('snaks', {}).items():
                                 for i, snak in enumerate(snaks):
-                                    if snak.get('snaktype') == 'value':
-                                        ref_dv = snak.get('datavalue', {})
-                                        if ref_dv.get('type') == 'wikibase-entityid':
-                                            ref_val = ref_dv.get('value', {}).get('id')
-                                        else:
-                                            ref_val = str(ref_dv.get('value'))
-                                    else:
-                                        ref_val = snak.get('snaktype')
+                                    ref_val = str(snak.get('datavalue', {}).get('value')) if snak.get('snaktype') == 'value' else snak.get('snaktype')
                                     refs_data.append((ref_hash, ref_prop_id, str(i), snak.get('datatype'), ref_val))
 
             return {
-                'claims': pd.DataFrame(claims_data, columns=['entity_id', 'entity_label', 'claim_id', 'rank', 'property_id', 'datatype', 'datavalue', 'object_id', 'object_label']),
+                # Changed first column name to 'qid'
+                'claims': pd.DataFrame(claims_data, columns=['qid', 'entity_label', 'claim_id', 'rank', 'property_id', 'datatype', 'datavalue', 'object_id', 'object_label']),
                 'claims_refs': pd.DataFrame(claims_refs_data, columns=['claim_id', 'reference_id']),
                 'refs': pd.DataFrame(refs_data, columns=['reference_id', 'reference_property_id', 'reference_index', 'reference_datatype', 'reference_value'])
             }
-
-        except Exception as e:
-            logger.error(f"Entity Process Error: {e}")
-            return self._empty_return()
+        except: return self._empty_return()
 
     def _empty_return(self):
         return {'claims': pd.DataFrame(), 'claims_refs': pd.DataFrame(), 'refs': pd.DataFrame()}
@@ -114,113 +123,65 @@ class EntityProcessor:
 class PropertyFilter:
     def __init__(self):
         self.bad_datatypes = ['commonsMedia', 'external-id', 'globe-coordinate', 'url', 'geo-shape', 'math', 'tabular-data']
-
     def filter_properties(self, claims_df: pd.DataFrame) -> pd.DataFrame:
         if claims_df.empty: return claims_df
-        df = claims_df[claims_df['rank'] != 'deprecated'].copy()
-        df = df[~df['datatype'].isin(self.bad_datatypes)]
-        return df
+        return claims_df[~claims_df['datatype'].isin(self.bad_datatypes)].copy()
 
 class URLProcessor:
     def __init__(self):
-        self.sparql_endpoint = "https://query.wikidata.org/sparql"
         self.api_endpoint = "https://www.wikidata.org/w/api.php"
         self.headers = {'User-Agent': 'ProVe-Tool/2.0'}
+        self.cache = LabelCache()
 
     def get_labels_via_api(self, id_list: List[str]) -> Dict[str, str]:
-        """
-        [NEW] Fetches labels using Wikidata Action API (wbgetentities).
-        Much more reliable than SPARQL for resolving IDs -> Text.
-        """
-        # Filter valid Q/P IDs
         unique_ids = list(set([x for x in id_list if x and isinstance(x, str) and (x.startswith('Q') or x.startswith('P'))]))
         if not unique_ids: return {}
         
-        labels_map = {}
+        final_map = {}
+        missing_ids = []
+
+        # 1. Check Cache
+        for uid in unique_ids:
+            cached = self.cache.get(uid)
+            if cached: final_map[uid] = cached
+            else: missing_ids.append(uid)
         
-        # Batch by 50 (API Limit)
-        chunk_size = 50
-        for i in range(0, len(unique_ids), chunk_size):
-            chunk = unique_ids[i:i+chunk_size]
-            params = {
-                "action": "wbgetentities",
-                "ids": "|".join(chunk),
-                "props": "labels",
-                "languages": "en", # Strict English
-                "format": "json"
-            }
-            try:
-                r = requests.get(self.api_endpoint, params=params, headers=self.headers, timeout=10)
-                data = r.json()
-                
-                if 'entities' in data:
-                    for eid, info in data['entities'].items():
-                        # Extract Label safely
-                        label = info.get('labels', {}).get('en', {}).get('value')
-                        if label:
-                            labels_map[eid] = label
-            except Exception as e:
-                logger.warning(f"API Label Fetch warning: {e}")
-                
-        return labels_map
-
-    def get_formatter_url(self, property_id: str) -> str:
-        # Keep using SPARQL for this one simple lookup
-        query = f"SELECT ?formatter_url WHERE {{ wd:{property_id} wdt:P1630 ?formatter_url. }}"
-        try:
-            r = requests.get(self.sparql_endpoint, params={'query': query, 'format': 'json'}, headers=self.headers, timeout=10)
-            return r.json()['results']['bindings'][0]['formatter_url']['value']
-        except: return 'no_formatter_url'
-
-    @staticmethod
-    def _reference_value_to_url(reference_value: str) -> str:
-        if reference_value in ['novalue', 'somevalue']: return reference_value
-        try:
-            val = ast.literal_eval(reference_value)
-            if isinstance(val, dict) and 'value' in val: return str(val['value'])
-            return str(val)
-        except: return str(reference_value)
+        # 2. Fetch Missing from API
+        if missing_ids:
+            logger.info(f"🌍 Fetching {len(missing_ids)} missing labels from API...")
+            chunk_size = 50
+            new_labels = {}
+            for i in range(0, len(missing_ids), chunk_size):
+                chunk = missing_ids[i:i+chunk_size]
+                params = {"action": "wbgetentities", "ids": "|".join(chunk), "props": "labels", "languages": "en", "format": "json"}
+                try:
+                    r = requests.get(self.api_endpoint, params=params, headers=self.headers, timeout=10)
+                    if r.status_code == 200:
+                        for eid, info in r.json().get('entities', {}).items():
+                            label = info.get('labels', {}).get('en', {}).get('value')
+                            if label: new_labels[eid] = label
+                except: pass
+            
+            self.cache.update(new_labels)
+            final_map.update(new_labels)
+            
+        return final_map
 
     def process_urls(self, filtered_data: Dict) -> pd.DataFrame:
         try:
-            claims_df = filtered_data['claims']
-            claims_refs_df = filtered_data['claims_refs']
             refs_df = filtered_data['refs']
-            
-            if claims_df.empty or refs_df.empty: return pd.DataFrame()
-
-            valid_claim_ids = claims_df['claim_id'].unique()
-            valid_refs = claims_refs_df[claims_refs_df['claim_id'].isin(valid_claim_ids)]
-            if valid_refs.empty: return pd.DataFrame()
-
-            valid_ref_ids = valid_refs['reference_id'].unique()
-            refs_subset = refs_df[refs_df['reference_id'].isin(valid_ref_ids)].copy()
-            
-            # URL Processing logic...
-            url_df = refs_subset[refs_subset['reference_datatype'] == 'url'].copy()
+            if refs_df.empty: return pd.DataFrame()
+            url_df = refs_df[refs_df['reference_datatype'] == 'url'].copy()
+            def clean_url(val):
+                if isinstance(val, str) and val.startswith("{"):
+                    try: return ast.literal_eval(val).get('value', val)
+                    except: return val
+                return val
             if not url_df.empty:
-                url_df['url'] = url_df['reference_value'].apply(self._reference_value_to_url)
-            
-            ext_id_df = refs_subset[refs_subset['reference_datatype'] == 'external-id'].copy()
-            if not ext_id_df.empty:
-                ext_id_df['ext_id'] = ext_id_df['reference_value'].apply(self._reference_value_to_url)
-                ext_id_df['formatter_url'] = ext_id_df['reference_property_id'].apply(self.get_formatter_url)
-                ext_id_df = ext_id_df[ext_id_df['formatter_url'] != 'no_formatter_url'].copy()
-                if not ext_id_df.empty:
-                    ext_id_df['url'] = ext_id_df.apply(lambda x: x['formatter_url'].replace('$1', x['ext_id']), axis=1)
-            
-            combined = []
-            if not url_df.empty: combined.append(url_df)
-            if not ext_id_df.empty: combined.append(ext_id_df)
-            
-            if not combined: return pd.DataFrame()
-            
-            final_df = pd.concat(combined, ignore_index=True)
-            return final_df[['reference_id', 'reference_property_id', 'url']].drop_duplicates()
-
-        except Exception as e:
-            logger.error(f"Error in process_urls: {e}")
+                url_df['url'] = url_df['reference_value'].apply(clean_url)
+                return url_df[['reference_id', 'reference_property_id', 'url']].drop_duplicates()
             return pd.DataFrame()
+        except: return pd.DataFrame()
 
 class WikidataParser:
     def __init__(self):
@@ -232,32 +193,29 @@ class WikidataParser:
     def process_entity(self, qid: str) -> Dict[str, pd.DataFrame]:
         self.processing_stats = {'entity_id': qid}
         
-        # 1. Fetch Raw Data
         data = self.entity_processor.process_entity(qid)
         claims = self.property_filter.filter_properties(data['claims'])
         
         if not claims.empty:
-            # --- FIX: ROBUST LABEL REPLACEMENT ---
-            
-            # 1. Gather all IDs (Properties + Objects)
+            # 1. Resolve Labels
             prop_ids = claims['property_id'].unique().tolist()
             obj_ids = claims[claims['object_id'].notna()]['object_id'].unique().tolist()
             all_ids = list(set(prop_ids + obj_ids))
             
-            # 2. Fetch Labels using new API Method
-            logger.info(f"Fetching labels for {len(all_ids)} IDs...")
             label_map = self.url_processor.get_labels_via_api(all_ids)
             
-            # 3. Apply Property Labels (P1050 -> "medical condition")
+            # 2. Apply Labels
             claims['property_label'] = claims['property_id'].apply(lambda x: label_map.get(x, x))
-            
-            # 4. Apply Object Labels (Q223591 -> "asthma")
-            # Logic: If object_id exists, look it up. If not, keep the date/number value.
             claims['object_label'] = claims.apply(
                 lambda row: label_map.get(row['object_id'], row['object_label']) if row['object_id'] else row['object_label'],
                 axis=1
             )
             
+            # 3. GENERATE TRIPLE
+            claims['triple'] = claims.apply(
+                lambda row: f"{row['entity_label']} | {row['property_label']} | {row['object_label']}",
+                axis=1
+            )
+            
         urls = self.url_processor.process_urls(data)
-        
         return {'claims': claims, 'urls': urls}
