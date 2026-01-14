@@ -3,6 +3,10 @@ import json
 import pandas as pd
 import logging
 import time
+import re
+import string
+from langdetect import detect, LangDetectException, DetectorFactory
+import torch
 from wikidata_parser import WikidataParser
 from refs_html_collection import HTMLFetcher
 from refs_html_to_evidences import HTMLSentenceProcessor, EvidenceSelector
@@ -11,28 +15,50 @@ from utils.textual_entailment_module import TextualEntailmentModule
 from utils.sentence_retrieval_module import SentenceRetrievalModule
 from utils.verbalisation_module import VerbModule
 
+DetectorFactory.seed = 0
 logger = logging.getLogger("prove")
 
 # --- CONFIG ---
-LIMIT_CLAIMS = 15
+LIMIT_CLAIMS = 20  
 LIMIT_URLS = 15
+TOP_K_EVIDENCE = 1  # <--- ONLY 1 EVIDENCE PER CLAIM
+
+IGNORED_PROPERTIES = ['P31', 'P279', 'P373', 'P910', 'P935', 'P1424', 'P1151', 'P1792', 'P1343', 'P1889', 'P460', 'P6104', 'P487', 'P395', 'P1476', 'P5008', 'P973', 'P2888', 'P856', 'P166']
 
 def initialize_models():
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # Clear GPU memory before loading
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
     print("⏳ Loading Models...")
     return TextualEntailmentModule(), SentenceRetrievalModule(), VerbModule()
 
+def clean_text_strict(text):
+    if not isinstance(text, str): return ""
+    text = re.sub(r'\s+', ' ', text) # Normalize whitespace
+    text = "".join(ch for ch in text if ch.isprintable()) # Remove hidden control chars
+    return text.strip()
+
+def is_valid_english_sentence(text):
+    if not isinstance(text, str): return False
+    text = clean_text_strict(text)
+    if len(text) < 50 or len(text) > 600: return False
+    garbage_phrases = ["privacy policy", "terms of use", "all rights reserved", "javascript is disabled", "cookie", "subscribe", "log in", "sign up", "copyright", "404 not found", "select language"]
+    if any(bad in text.lower() for bad in garbage_phrases): return False
+    if sum(c.isalpha() for c in text) / len(text) < 0.6: return False
+    try:
+        if detect(text) != 'en': return False
+    except LangDetectException: return False
+    return True
+
 def save_results_categorized(all_results_df: pd.DataFrame, output_file: str):
     if all_results_df.empty: return
-
-    # 1. Clean and deduplicate columns
+    
     all_results_df = all_results_df.loc[:, ~all_results_df.columns.duplicated()]
-
-    # --- FIX: Safety initialization for required columns ---
     if 'label_probabilities' not in all_results_df.columns:
         all_results_df['label_probabilities'] = [{} for _ in range(len(all_results_df))]
     
-    # 2. CREATE READABLE IDS
     def make_readable(row):
         triple = str(row.get('triple', ''))
         if '|' in triple:
@@ -42,11 +68,11 @@ def save_results_categorized(all_results_df: pd.DataFrame, output_file: str):
 
     all_results_df['readable_id'] = all_results_df.apply(make_readable, axis=1)
 
-    # 3. Aggregate by Claim
     unique_claims = []
     for readable_id, group in all_results_df.groupby('readable_id'):
         first_row = group.iloc[0]
         
+        # Since Top-K is 1, this list will only have 1 item
         evidence_list = []
         for _, row in group.iterrows():
             evidence_list.append({
@@ -66,13 +92,10 @@ def save_results_categorized(all_results_df: pd.DataFrame, output_file: str):
             'evidence': evidence_list,
             'processing_time': float(first_row.get('entity_processing_time', 0)),
             'max_retrieval_score': max([e['retrieval_score'] for e in evidence_list]) if evidence_list else 0,
-            # This line caused the crash previously; now it's safe
             'label_probabilities': first_row.get('label_probabilities', {})
         })
     
     unique_claims_df = pd.DataFrame(unique_claims)
-
-    # 4. Export to JSON
     final_output = {}
     for verdict in ['SUPPORTS', 'REFUTES', 'NOT_ENOUGH_INFO']:
         subset = unique_claims_df[unique_claims_df['result'] == verdict]
@@ -83,82 +106,98 @@ def save_results_categorized(all_results_df: pd.DataFrame, output_file: str):
 
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(final_output, f, indent=4, ensure_ascii=False)
-    print(f"✅ Saved Human-Readable Results: {output_file}")
+    print(f"✅ Saved Top-1 Results: {output_file}")
 
 def process_entity(qid: str, models: tuple) -> tuple:
     start_time = time.perf_counter()
     text_entailment, sentence_retrieval, verb_module = models
     
-    # 1. Parse
     parser = WikidataParser()
     parser_result = parser.process_entity(qid)
+    
     if parser_result['claims'].empty: return pd.DataFrame(), pd.DataFrame(), {}
 
+    parser_result['claims'] = parser_result['claims'][~parser_result['claims']['property_id'].isin(IGNORED_PROPERTIES)]
+    parser_result['claims'] = parser_result['claims'].dropna(subset=['property_label', 'object_label'])
+    
+    if parser_result['claims'].empty: return pd.DataFrame(), pd.DataFrame(), {}
     if len(parser_result['claims']) > LIMIT_CLAIMS:
         parser_result['claims'] = parser_result['claims'].head(LIMIT_CLAIMS)
 
-    # 2. Verbalize
-    triples_input = [{"subject": str(r['entity_label']), "predicate": str(r['property_label']), "object": str(r['object_label'])} 
-                     for _, r in parser_result['claims'].iterrows()]
+    triples_input = [{"subject": str(r['entity_label']), "predicate": str(r['property_label']), "object": str(r['object_label'])} for _, r in parser_result['claims'].iterrows()]
     try:
         generated = verb_module.verbalise(triples_input)
         parser_result['claims']['verbalized_claim'] = generated
     except:
         parser_result['claims']['verbalized_claim'] = parser_result['claims']['triple']
 
-    # 3. Fetch
     fetcher = HTMLFetcher()
     html_df = fetcher.fetch_all_html(parser_result['urls'].head(LIMIT_URLS), parser_result)
     
-    # 4. Sentences
     processor = HTMLSentenceProcessor()
     sentences_data = []
     for _, row in html_df.iterrows():
         if row['status'] == 200 and row['html']:
-            text = processor.html_to_text(row["html"])[:10000]
+            text = processor.html_to_text(row["html"])[:15000]
             for s in processor.text_to_sentences(text):
-                if 50 < len(s.strip()) < 500:
+                if is_valid_english_sentence(s):
                     sentences_data.append({"url": row["url"], "sentence": s.strip(), "reference_id": row.get("reference_id")})
 
     if not sentences_data: return html_df, pd.DataFrame(), {}
     
-    # 5. Selection
     evidence_df = EvidenceSelector(sentence_retrieval=sentence_retrieval).select_relevant_sentences(parser_result['claims'], pd.DataFrame(sentences_data))
     
-    # 6. Merge Metadata
+    # --- TOP 1 SELECTION ---
+    if not evidence_df.empty:
+        # Create temp normalized column for strict dedupe
+        evidence_df['norm_sent'] = evidence_df['sentence'].apply(clean_text_strict)
+        
+        # Sort by score descending
+        evidence_df = evidence_df.sort_values(by=['claim_id', 'similarity_score'], ascending=[True, False])
+        
+        # Dedupe by content
+        evidence_df = evidence_df.drop_duplicates(subset=['claim_id', 'norm_sent'])
+        
+        # KEEP ONLY THE TOP 1
+        evidence_df = evidence_df.groupby('claim_id').head(TOP_K_EVIDENCE)
+    
     duration = time.perf_counter() - start_time
     if not evidence_df.empty:
         meta_cols = ['claim_id', 'qid', 'entity_label', 'triple', 'verbalized_claim', 'property_id', 'object_id']
         claims_meta = parser_result['claims'].copy()
         claims_meta['entity_processing_time'] = duration
-        
         claims_meta['claim_id'] = claims_meta['claim_id'].astype(str)
         evidence_df['claim_id'] = evidence_df['claim_id'].astype(str)
-        
         drop_cols = [c for c in meta_cols if c in evidence_df.columns and c != 'claim_id']
         evidence_df = evidence_df.drop(columns=drop_cols)
         evidence_df = evidence_df.merge(claims_meta, on='claim_id', how='left')
 
-    # 7. Entailment
     entailment_results = ClaimEntailmentChecker(text_entailment=text_entailment).process_entailment(evidence_df, html_df, qid)
     return html_df, entailment_results, {}
 
 if __name__ == "__main__":
-    DIVERSE_WIKIDATA_INSTANCES = { #LEADERS 
-        "Q76": "Barack Obama",
-     "Q969": "Winston Churchill", "Q312": "Julius Caesar", "Q12892": "Queen Elizabeth II", "Q352963": "Mahatma Gandhi", # LANDMARKS 
-     "Q84": "Eiffel Tower", "Q34374": "Colosseum", "Q924": "Taj Mahal", "Q11693": "Machu Picchu", "Q43361": "Statue of Liberty", # ARTISTS 
-     "Q558": "Leonardo da Vinci", "Q338": "Vincent van Gogh", "Q543": "Frida Kahlo", "Q762": "Ludwig van Beethoven", "Q1339": "Mozart", # ANIMALS 
-     "Q146": "House cat", "Q833": "Tiger", "Q7377": "Elephant", "Q11573": "Bald eagle", "Q470": "Blue whale" }
+    DIVERSE_WIKIDATA_INSTANCES = {
+        "Q76": "Barack Obama", "Q8016": "Winston Churchill", "Q1048": "Julius Caesar", "Q9682": "Queen Elizabeth II", "Q1001": "Mahatma Gandhi",
+        "Q243": "Eiffel Tower", "Q10285": "Colosseum", "Q9141": "Taj Mahal", "Q676203": "Machu Picchu", "Q9202": "Statue of Liberty",
+        "Q90": "Paris", "Q597": "Lisbon", "Q1492": "Barcelona", "Q220": "Rome", "Q84": "London",
+        "Q177": "Pizza", "Q271555": "Biryani", "Q178": "Pasta", "Q1362405": "Gelato", "Q13233": "Ice Cream" 
+    }
+    
     OUTPUT_FILE = "prove_metrics_results.json"
     models = initialize_models() 
+    
     all_results = []
     for qid, label in DIVERSE_WIKIDATA_INSTANCES.items():
-        print(f"--- Processing {label} ---")
+        print(f"\n--- Processing {label} ({qid}) ---")
         try:
             _, results, _ = process_entity(qid, models)
-            if results is not None and not results.empty: all_results.append(results)
-        except Exception as e: print(f"❌ Error {qid}: {e}")
+            if results is not None and not results.empty:
+                all_results.append(results)
+                print(f"✅ Finished {label}")
+            else:
+                print(f"⚠️ No results for {label}")
+        except Exception as e:
+            print(f"❌ Error {qid}: {e}")
     
     if all_results:
         full_df = pd.concat(all_results, ignore_index=True)
