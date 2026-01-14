@@ -1,43 +1,45 @@
-"""
-Sentence Retrieval Module for ProVe
-Fixed: Forces online model loading to bypass local vocabulary mismatch errors.
-"""
-from sentence_transformers import SentenceTransformer, util, models
+from sentence_transformers import SentenceTransformer, util
 import torch
 import numpy as np
 import os
 from utils.logger import logger
 
 class SentenceRetrievalModule:
-    def __init__(self, model_path='./sentence_retrieval_pytorch_bert_base_model_OG'):
+    def __init__(self, model_path='./sentence_retrieval_pytorch_bert_base_model_FIXED'):
         """
-        Initialize Sentence Retrieval.
-        CRITICAL FIX: We default to the online 'all-MiniLM-L6-v2' model.
-        The local model at 'model_path' has a vocabulary mismatch (IndexError) and causes crashes.
+        Loads the local Sentence Retrieval model.
+        Assumes 'model_path' points to the FIXED version (resized embeddings).
         """
-        # Define the device locally (CPU is safer for retrieval)
-        self.device = torch.device("cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
-        print(f"⚠️ DEBUG: Bypassing local model at {model_path} to prevent Vocabulary Mismatch crash.")
-        print(f"✅ Loading standard 'all-MiniLM-L6-v2' from HuggingFace...")
+        print(f"⏳ Loading Sentence Retrieval Model from: {model_path}")
         
-        # Load standard stable model
-        self.model = SentenceTransformer('all-MiniLM-L6-v2', device="cpu")
-        
-        # Explicitly set max sequence length to avoid overflow
-        self.model.max_seq_length = 512
+        try:
+            # 1. Try loading the local FIXED model
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Model path not found: {model_path}")
+                
+            self.model = SentenceTransformer(model_path, device=str(self.device))
+            print(f"✅ Loaded LOCAL model successfully on {self.device}")
+            
+        except Exception as e:
+            # 2. Fallback only if local fails
+            print(f"⚠️ Failed to load local model ({e}). Downloading fallback...")
+            self.model = SentenceTransformer('all-MiniLM-L6-v2', device=str(self.device))
+
+        # Ensure max length is set
+        if not hasattr(self.model, 'max_seq_length') or self.model.max_seq_length is None:
+            self.model.max_seq_length = 512
 
     def retrieve_sentences(self, text, claim, top_k=5):
-        """Retrieve most relevant sentences for a claim using CPU"""
-        # Basic cleaning and splitting
+        """Retrieve most relevant sentences for a claim."""
+        # Clean sentences
         sentences = [s.strip() for s in text.split('.') if len(s.strip()) > 10]
-        
         if not sentences:
             return []
         
         try:
-            # Encode on CPU
-            # Note: We rely on the model's internal max_seq_length for truncation
+            # Encode Claim
             claim_embedding = self.model.encode(
                 [claim], 
                 convert_to_tensor=True, 
@@ -45,6 +47,7 @@ class SentenceRetrievalModule:
                 device=self.device
             )
             
+            # Encode Corpus
             sentence_embeddings = self.model.encode(
                 sentences, 
                 convert_to_tensor=True, 
@@ -52,14 +55,23 @@ class SentenceRetrievalModule:
                 device=self.device
             )
             
-            # Compute cosine similarity
+            # Similarity
             similarities = util.cos_sim(claim_embedding, sentence_embeddings)[0]
             
-            # Get top-k indices
-            top_indices = np.argsort(similarities.cpu().numpy())[-top_k:][::-1]
-            results = [(sentences[i], float(similarities[i])) for i in top_indices]
+            # Top-K
+            # Ensure we don't ask for more top_k than we have sentences
+            k = min(top_k, len(sentences))
+            if k == 0: return []
+
+            # Get indices of top scores (descending)
+            top_indices = torch.topk(similarities, k).indices.cpu().numpy()
+            
+            results = []
+            for i in top_indices:
+                results.append((sentences[i], float(similarities[i])))
             
             return results
+
         except Exception as e:
             logger.error(f"Error during sentence retrieval: {e}")
             return []
