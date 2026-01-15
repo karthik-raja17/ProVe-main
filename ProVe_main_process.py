@@ -21,28 +21,27 @@ logger = logging.getLogger("prove")
 # --- CONFIG ---
 LIMIT_CLAIMS = 20  
 LIMIT_URLS = 15
-TOP_K_EVIDENCE = 1  # <--- ONLY 1 EVIDENCE PER CLAIM
+TOP_K_EVIDENCE = 5 
 
 IGNORED_PROPERTIES = ['P31', 'P279', 'P373', 'P910', 'P935', 'P1424', 'P1151', 'P1792', 'P1343', 'P1889', 'P460', 'P6104', 'P487', 'P395', 'P1476', 'P5008', 'P973', 'P2888', 'P856', 'P166']
 
 def initialize_models():
-    # Clear GPU memory before loading
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        
-    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     print("⏳ Loading Models...")
     return TextualEntailmentModule(), SentenceRetrievalModule(), VerbModule()
 
-def clean_text_strict(text):
+def create_fingerprint(text):
     if not isinstance(text, str): return ""
-    text = re.sub(r'\s+', ' ', text) # Normalize whitespace
-    text = "".join(ch for ch in text if ch.isprintable()) # Remove hidden control chars
-    return text.strip()
+    text = text.lower()
+    text = text.translate(str.maketrans('', '', string.punctuation))
+    text = re.sub(r'\s+', '', text)
+    return text
 
 def is_valid_english_sentence(text):
     if not isinstance(text, str): return False
-    text = clean_text_strict(text)
+    text = text.strip()
     if len(text) < 50 or len(text) > 600: return False
     garbage_phrases = ["privacy policy", "terms of use", "all rights reserved", "javascript is disabled", "cookie", "subscribe", "log in", "sign up", "copyright", "404 not found", "select language"]
     if any(bad in text.lower() for bad in garbage_phrases): return False
@@ -69,18 +68,30 @@ def save_results_categorized(all_results_df: pd.DataFrame, output_file: str):
     all_results_df['readable_id'] = all_results_df.apply(make_readable, axis=1)
 
     unique_claims = []
+    # Deduplicate evidences for JSON Output
     for readable_id, group in all_results_df.groupby('readable_id'):
         first_row = group.iloc[0]
         
-        # Since Top-K is 1, this list will only have 1 item
+        # Deduplicate evidence in the output list
+        seen_fingerprints = set()
         evidence_list = []
-        for _, row in group.iterrows():
-            evidence_list.append({
-                "url": str(row.get('url', '')),
-                "sentence": str(row.get('result_sentence', '')),
-                "retrieval_score": float(row.get('similarity_score', 0.0)),
-                "entailment_probs": row.get('label_probabilities', {})
-            })
+        
+        # We sort by similarity to prioritize best evidence
+        sorted_group = group.sort_values('similarity_score', ascending=False)
+        
+        for _, row in sorted_group.iterrows():
+            sent = str(row.get('sentence', ''))
+            fp = create_fingerprint(sent)
+            if fp not in seen_fingerprints:
+                evidence_list.append({
+                    "url": str(row.get('url', '')),
+                    "sentence": sent,
+                    "retrieval_score": float(row.get('similarity_score', 0.0)),
+                    "entailment_probs": row.get('evidence_probs', {})
+                })
+                seen_fingerprints.add(fp)
+            if len(evidence_list) >= TOP_K_EVIDENCE:
+                break
 
         unique_claims.append({
             'readable_name': readable_id,
@@ -89,6 +100,7 @@ def save_results_categorized(all_results_df: pd.DataFrame, output_file: str):
             'object_id': str(first_row.get('object_id', 'N/A')),
             'verbalized_claim': str(first_row.get('verbalized_claim', '')),
             'result': str(first_row.get('result', 'NOT_ENOUGH_INFO')),
+            'relevance_score': float(first_row.get('relevance_score', 0.0)), # <--- NEW FIELD
             'evidence': evidence_list,
             'processing_time': float(first_row.get('entity_processing_time', 0)),
             'max_retrieval_score': max([e['retrieval_score'] for e in evidence_list]) if evidence_list else 0,
@@ -106,7 +118,7 @@ def save_results_categorized(all_results_df: pd.DataFrame, output_file: str):
 
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(final_output, f, indent=4, ensure_ascii=False)
-    print(f"✅ Saved Top-1 Results: {output_file}")
+    print(f"✅ Saved Results with Relevance Scores: {output_file}")
 
 def process_entity(qid: str, models: tuple) -> tuple:
     start_time = time.perf_counter()
@@ -147,18 +159,10 @@ def process_entity(qid: str, models: tuple) -> tuple:
     
     evidence_df = EvidenceSelector(sentence_retrieval=sentence_retrieval).select_relevant_sentences(parser_result['claims'], pd.DataFrame(sentences_data))
     
-    # --- TOP 1 SELECTION ---
     if not evidence_df.empty:
-        # Create temp normalized column for strict dedupe
-        evidence_df['norm_sent'] = evidence_df['sentence'].apply(clean_text_strict)
-        
-        # Sort by score descending
+        evidence_df['fingerprint'] = evidence_df['sentence'].apply(create_fingerprint)
         evidence_df = evidence_df.sort_values(by=['claim_id', 'similarity_score'], ascending=[True, False])
-        
-        # Dedupe by content
-        evidence_df = evidence_df.drop_duplicates(subset=['claim_id', 'norm_sent'])
-        
-        # KEEP ONLY THE TOP 1
+        evidence_df = evidence_df.drop_duplicates(subset=['claim_id', 'fingerprint'])
         evidence_df = evidence_df.groupby('claim_id').head(TOP_K_EVIDENCE)
     
     duration = time.perf_counter() - start_time
@@ -188,16 +192,12 @@ if __name__ == "__main__":
     
     all_results = []
     for qid, label in DIVERSE_WIKIDATA_INSTANCES.items():
-        print(f"\n--- Processing {label} ({qid}) ---")
+        print(f"--- Processing {label} ({qid}) ---")
         try:
             _, results, _ = process_entity(qid, models)
             if results is not None and not results.empty:
                 all_results.append(results)
-                print(f"✅ Finished {label}")
-            else:
-                print(f"⚠️ No results for {label}")
-        except Exception as e:
-            print(f"❌ Error {qid}: {e}")
+        except Exception as e: print(f"❌ Error {qid}: {e}")
     
     if all_results:
         full_df = pd.concat(all_results, ignore_index=True)
