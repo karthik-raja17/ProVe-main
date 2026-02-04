@@ -6,6 +6,8 @@ ProVe is a system designed to automatically verify claims and references in Wiki
 
 This repository contains a **Forensic Restoration** of the original pipeline, modernizing it for practical application on **real-world data**. While the original research utilized pre-annotated "golden data" for evaluation, this version is engineered to operate in live environments where such references are unavailable, addressing technical gaps and optimizing resource management for production-grade stability.
 
+---
+
 ## System Architecture & Improvements
 
 The system consists of several key components, including original modules and forensic upgrades:
@@ -41,11 +43,15 @@ The system consists of several key components, including original modules and fo
 
 
 
+---
+
 ## Technical Stability & Optimizations
 
 * **Dynamic Device Allocation**: Solves CUDA Out-of-Memory (OOM) errors by isolating the GPU for entailment scoring while offloading verbalization and retrieval tasks to the CPU, reducing VRAM usage by 45%.
 * **Manual Embedding Resizing**: Resolves model loading errors by adjusting the token embedding layer (to size 32,103) to accommodate custom structural tokens (`<H>`, `<R>`, `<T>`).
 * **Load-Update-Save Persistence**: Implements an atomic write pattern to ensure zero data loss and resumable processing during multi-hour batch runs.
+
+---
 
 ## Setup Instructions
 
@@ -65,6 +71,8 @@ Download from the [original repository](https://github.com/gabrielmaia7/RSP) and
 ### 3. Configure the System
 
 Review and modify the `config.yaml` file to adjust database settings, HTML fetching parameters (batch size, delay), and evidence selection thresholds.
+
+---
 
 ## Usage
 
@@ -91,6 +99,8 @@ python ProVe_main_service.py
 
 ```
 
+---
+
 ## Data Flow
 
 1. A Wikidata QID is provided to the system.
@@ -100,6 +110,17 @@ python ProVe_main_service.py
 5. NLP models verbalize the triple and select the Top-5 relevant evidence passages.
 6. **Sequential Priority Logic** determines if the evidence supports or refutes the claim.
 7. Results are saved using the **Load-Update-Save** persistence pattern.
+
+---
+
+## Future Work & Performance Improvements
+
+Closing the current performance gap requires further research and engineering in the following areas:
+
+* **Hybrid Retrieval**: Merging the lexical precision of keyword matching (to handle exact dates and names) with the semantic understanding of dense retrieval. This addresses the "Modernization Trap" where current SOTA models occasionally miss factual matches.
+* **Local Domain Fine-Tuning**: Training the DeBERTa model specifically on domain-specific Wikidata entailment data. This aims to close the gap with proprietary API performance by tailoring the model to the unique semantic structures of Knowledge Graph claims.
+
+---
 
 ## Acknowledgments
 
