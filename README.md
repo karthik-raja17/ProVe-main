@@ -60,7 +60,7 @@ pip install -r requirements.txt
 
 The `base` folder contains essential NLP models, including the fine-tuned T5 verbalizer and pre-trained DeBERTa/MiniLM models.
 
-Download from the [original repository SharePoint](https://github.com/gabrielmaia7/RSP) and place the `base` folder in the project root directory.
+Download from the [original repository](https://github.com/gabrielmaia7/RSP) and place the `base` folder in the project root directory.
 
 ### 3. Configure the System
 
